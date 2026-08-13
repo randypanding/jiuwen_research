@@ -1231,3 +1231,187 @@ infer_router：FastAPI / uvicorn / pydantic(-settings) / httpx / loguru / promet
 #### 关键外部依赖
 
 服务端以 `fastify` 及其 `@fastify/{cors,cookie,multipart,static,websocket}` 插件为骨架，实时层用 `socket.io`，校验用 `zod`，配置持久化用 `conf`，凭据存储用 `cross-keychain`；MCP 侧用 `@modelcontextprotocol/sdk`；存储用 `ioredis` 与工作区包 `@openjiuwen/relay-storage-sqlite`；IM 连接器分别依赖 `@larksuiteoapi/node-sdk`（飞书）、`@wecom/aibot-node-sdk`（企业微信）、`dingtalk-stream`（钉钉）；内容处理用 `cheerio`、`fast-xml-parser`、`jszip`、`cron-parser`、`@huggingface/transformers`；前端用 `react-router-dom`、`@xyflow/react`、`@codemirror/*`、`docx-preview`、`exceljs`。值得注意的是 **API 包内没有 `@anthropic-ai/sdk` 或 `openai` SDK**——模型交互统一走 CLI 子进程或 ACP 运行时，各 Provider SDK 位于独立的 `@office-claw/provider-*` npm 包中（`relay/packages/api/package.json:L47-L85`）。工程工具链为 pnpm 9.15.4 + Biome + Changesets + dependency-cruiser（`relay/package.json:L98-L108`）。
+
+---
+
+## 3. 跨组件交互协议
+
+以下结论均来自依赖声明文件与实际调用代码，而非文档描述。
+
+### 3.1 agent-core 是唯一的进程内公共内核
+
+`agent-core` 发布的 Python 包名为 `openjiuwen`，是整个生态里唯一被多个组件以**库依赖**（而非网络调用）方式引入的组件。各组件的声明位置与版本约束差异明显，说明它们并未统一节奏：
+
+| 依赖方 | 声明位置 | 约束 | 形式 |
+| --- | --- | --- | --- |
+| jiuwenswarm | `jiuwenswarm/pyproject.toml:L20` | `git+https://gitcode.com/openJiuwen/agent-core.git@develop`（extras `claude,codex`） | 分支源码依赖 |
+| jiuwenswarm（分发场景） | `jiuwenswarm/pyproject.toml:L69`、`L103` | 同上，另含 `openjiuwen[postgres,zmq]` | 分支源码依赖 |
+| agent-studio（agent-runtime 包装层） | `agent-studio/agent-runtime/pyproject.toml:L11` | `git+...agent-core.git@develop`（extras `sandbox`） | 分支源码依赖 |
+| agent-runtime（IR 执行服务） | `agent-runtime/applications/ir_execution_service/pyproject.toml:L12` | `openjiuwen[chromadb,obs]>=0.1.9` | PyPI 下限 |
+| skillhub（skill-runner） | `skillhub/skill-runner/pyproject.toml:L14` | `openjiuwen==0.1.15` | PyPI 精确钉版 |
+| jiuwensymbiosis | `jiuwensymbiosis/pyproject.toml:L15` | `openjiuwen>=0.1.13` | PyPI 下限 |
+| deepsearch | `deepsearch/deepsearch/pyproject.toml:L27` | `openjiuwen==0.1.10.post3` | PyPI 精确钉版 |
+
+- **发现**: 三种依赖形态（git 分支 / `>=` 下限 / `==` 钉版）并存，且钉版彼此不同（`0.1.10.post3` vs `0.1.15`），意味着这些组件不能在同一 Python 环境中共存安装。
+- **发现**: `jiuwensymbiosis` 是唯一做了严格隔离的消费者——所有 `openjiuwen.*` 导入都收口在单个文件里，其余业务代码只依赖该文件的再导出符号。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/agent/abstractions.py:L13-L24`
+- `agent-runtime` 内部还形成了自有的包分层（`openjiuwen-runtime-foundation` / `-management` / `-service`），由 CLI 包统一聚合。
+  - 证据: `agent-runtime/cli/pyproject.toml:L15-L16`、`agent-runtime/foundation/pyproject.toml:L6`
+
+### 3.2 Agent Studio ↔ Agent Runtime：Spring Cloud OpenFeign over HTTP
+
+- **发现**: Java 侧的 `studio-manager-service` 通过 `@FeignClient(name = "agentRuntime")` 调用 Python 侧 agent-runtime 的 REST 接口，端点由 `agent_runtime_endpoint` 注入，默认 `http://127.0.0.1:31014`；`agent_builder_endpoint` 默认 `:31015`，`user_auth_endpoint` 与 manager 自身监听端口同为 `31111`。
+  - 证据: `agent-studio/backend/studio-manager-service/src/main/java/com/openjiuwen/studio/agent/manager/rce/client/AgentRuntimeClient.java:L42-L43`、`agent-studio/backend/studio-manager-service/src/main/resources/application-manager.yml:L100-L105`、`L508-L510`、`L540`、`L114`
+- **发现**: 会话调用路径是 `POST /v1/{project_id}/agents/{agent_id}/conversations`（新建会话）与 `.../conversations/{conversation_id}`（续接会话），各有阻塞与流式两套重载；另有 `/v1/{project_id}/releases` 发布接口与 `/v1/{project_id}/mcp-servers/tools[/run]` 的 MCP 工具列举与执行接口。
+  - 证据: `agent-studio/backend/studio-manager-service/src/main/java/com/openjiuwen/studio/agent/manager/rce/client/AgentRuntimeClient.java:L51`、`L76`、`L88`、`L96-L139`
+- **发现**: Feign 超时刻意做了非对称配置——连接 10 秒、读取 120 秒，符合"长时间 Agent 推理"的调用特征。
+  - 证据: `agent-studio/backend/studio-manager-service/src/main/resources/application-manager.yml:L103-L104`
+
+### 3.3 Agent Memory：Java 服务层 → Python 内核的双进程 HTTP 拆分
+
+- **发现**: `agent-memory` 自身就是跨语言双进程：Java `platform` 服务监听 `9000`，向下游 Python 记忆内核（`memory_server`）以 HTTP 调用，下游默认 `http://127.0.0.1:8000`，并带一个默认的服务间 api-key（值见配置文件，本清单不复制）。
+  - 证据: `agent-memory/agent-memory-platform/platform/src/main/resources/application.yml:L18`、`L35-L36`
+- **发现**: `jiuwenswarm` 以配置项方式接入 agent-memory，支持 `server`（远程 HTTP）与 `sdk`（进程内直连后端）两种模式，server 模式默认指向 `http://127.0.0.1:8137` ——**与 agent-memory 自身声明的 9000/8000 端口都不一致**，说明二者的默认部署拓扑并未对齐。
+  - 证据: `jiuwenswarm/jiuwenswarm/resources/config.yaml:L197-L199`、`L205-L208`
+
+### 3.4 Agent Protocol：A2X Registry 客户端以"源码内嵌"而非包依赖的方式扩散
+
+- **发现**: `agent-protocol/AgentRegistry` 提供了 `a2x_registry_client` Python SDK（同步 + 异步 + CLI + 心跳 + 归属登记）；`jiuwenswarm` 并未把它作为依赖安装，而是把 `_internal.py` / `client.py` / `async_client.py` / `errors.py` / `models.py` / `ownership.py` / `transport.py` 整套**复制**进了自己的目录树。
+  - 证据: `agent-protocol/AgentRegistry/client/a2x_registry_client/client.py`、`jiuwenswarm/jiuwenswarm/agents/harness/team/a2x/client/client.py`
+- **发现**: 复制版本已经产生漂移——上述 7 个文件与上游**逐一存在差异**，`client.py` 上游 746 行、内嵌版 530 行。二者不再是同一份实现，跨仓升级不会自动传导。
+  - 证据: 同上两路径
+- **发现**: 客户端把已登记的 Agent 归属信息落到 `~/.a2x_registry_client/owned.json`，这是两个仓库之间事实上的共享本地状态。
+  - 证据: `jiuwenswarm/jiuwenswarm/agents/harness/team/a2x/client/_internal.py:L32`
+
+### 3.5 A2A 作为跨运行时的对外协议边界
+
+- **发现**: `agent-runtime` 的 `a2a_service` 用 `a2a-sdk` 暴露标准 `GET /a2a/.well-known/agent-card.json` 与 `POST /a2a/` JSON-RPC 入口，把请求转交给内部的 `VersatileAdapter` 执行。这是运行时对外的协议化外壳。
+  - 证据: `agent-runtime/applications/a2a_service/app.py:L9-L10`、`L26-L30`、`L140`
+- **发现**: `VersatileAdapter` 自身是独立进程，TaskStore 在配置 Redis 时用 `RedisTaskStore`、否则退化为 `InMemoryTaskStore`——即多副本部署必须配 Redis 才能共享任务状态。
+  - 证据: `agent-runtime/applications/versatile_adapter/app.py:L118-L120`
+
+### 3.6 SkillHub：市场进程 + 独立 Runner 进程
+
+- **发现**: `skillhub` 的 marketplace 服务本身**不**在进程内导入 agent-core，而是通过 HTTP 把 Playground 请求代理给独立的 `skill-runner` 服务（默认 `http://127.0.0.1:8900`，可由 `MARKET_SKILL_RUNNER_URL` / `SKILL_RUNNER_URL` 覆盖）；真正依赖 `openjiuwen==0.1.15` 的是 `skill-runner`。
+  - 证据: `skillhub/marketplace/plugins_market/core/config.py:L396-L399`、`skillhub/marketplace/plugins_market/routers/playground_proxy.py:L45-L47`、`skillhub/skill-runner/pyproject.toml:L14`
+- **发现**: `skillhub` 是全生态里唯一在代码中**硬编码枚举了兄弟仓库清单**的组件——GitHub 自动标星逻辑固定了 10 个核心仓库名，其中包含本工作区未纳入的 `agent-core-java` 与 `agent-runtime-java`。这是对 openJiuwen 组件边界最直接的代码级佐证。
+  - 证据: `skillhub/marketplace/plugins_market/routers/github_watch.py:L54-L67`
+
+### 3.7 Relay：以子进程 + 本地 IPC 桥接 Python 生态
+
+- **发现**: `relay` 与其余 Python 组件之间**没有任何包依赖或 HTTP 契约**，唯一的连接方式是把 `python -m jiuwenclaw.app_agentserver` 作为子进程拉起，作为名为 `relayclaw` 的 ACP Provider，通过本地 IPC 帧队列通信；数据目录由 `JIUWENCLAW_DATA_DIR` 指定。
+  - 证据: `relay/packages/api/src/domains/agents/services/agents/providers/relayclaw-sidecar.ts:L439-L443`、`L183`
+- **发现**: `relay` 另有一条完全独立的技能供应链，指向外部域名 `lightmake.site`（腾讯 SkillHub），与本工作区的 `skillhub` 组件无代码关联。
+  - 证据: `relay/packages/api/src/domains/agents/services/skillhub/TencentSkillHubService.ts:L17-L18`
+
+### 3.8 协议栈采用度差异
+
+按各子模块内含 `mcp` / `a2a` / `acp` 关键字的文件数统计（在各子模块目录下对源码文件做不区分大小写的名称与内容匹配得到），三种协议的落地程度极不均衡：
+
+| 组件 | MCP | A2A | ACP | 观察 |
+| --- | --- | --- | --- | --- |
+| agent-core | 135 | 262 | 3 | A2A 为主，ACP 仅零星出现 |
+| agent-studio | 287 | 少量 | 少量 | MCP 工具生态最重，且有 Feign 私有协议兜底 |
+| relay | 77 | 38 | 23 | 三协议均有，ACP 用于 Provider 插件 |
+| jiuwenswarm | 65 | 31 | 53 | ACP 使用密度全生态最高 |
+| agent-protocol | 10 | 27 | 0 | 定义方，A2A 与 Registry 为核心 |
+| agent-runtime | 少量 | 36 | 0 | 仅以 A2A 对外 |
+| agent-tools | 0 | 0 | 0 | 完全不参与 Agent 协议层 |
+
+- **发现**: `agent-tools` 在协议层是完全孤立的——它既不实现 MCP/A2A/ACP，也不被任何组件以包依赖引入；它与生态的唯一耦合是**反向**的：其工具通过 agent-core 提供的 `@tool` 装饰器注册，并以 OpenAI 兼容 HTTP 接口对外提供推理路由。
+  - 证据: `agent-tools/` 目录内无 MCP/A2A/ACP 相关实现文件
+
+### 3.9 总体架构判断
+
+- **发现**: 生态并不存在统一的服务总线或统一注册中心。实际存在四种互不相同的耦合方式：①Python 包内嵌依赖（agent-core 为中心，星形）；②语言间 HTTP（Studio↔Runtime、Memory Java↔Python、SkillHub↔Runner）；③协议化边界（A2A / MCP / ACP，覆盖不完整）；④源码复制（A2X Registry 客户端）。跨组件版本一致性没有任何机制保障。
+
+---
+
+## 4. 待确认/模糊地带
+
+以下模块在代码中确实存在，但要么是空壳/占位、要么被显式关闭、要么带有"临时/测试用"标注，不应被当作可用能力计入基线。
+
+### Agent Core
+
+- **`auto_harness` 顶层包已被架空**: 整个包只剩一个 `__init__.py`，全部符号从 `openjiuwen.rsi.auto_harness` 再导出，注释自述为"移入 RSI 后的兼容导出"。上层引用者到底该用哪个路径尚未收敛。
+  - 证据: `agent-core/openjiuwen/auto_harness/__init__.py:L1-L39`
+- **`symphony` 能力资产域**: README 描述了指纹/检索/编排/经验/评估五大能力，但 `runtime.py` 仅 38 行，实际完成度与描述差距需要逐子包核实。
+  - 证据: `agent-core/openjiuwen/symphony/runtime.py:L1-L38`、`agent-core/openjiuwen/symphony/README.md:L1-L12`
+- **`dev_tools/tune` 训练/调优子系统**: 含 `trainer` / `optimizer` / `evaluator` / `dataset` 全套目录，但未见对外文档化的入口，定位介于研究脚本与产品能力之间。
+  - 证据: `agent-core/openjiuwen/dev_tools/tune/base.py:L1-L10`
+- **`agent_teams/messager/hybrid.py`**: 名为 hybrid，实为"供外部 team 客户端使用的 WebSocket publisher"，命名与实现语义不一致。
+  - 证据: `agent-core/openjiuwen/agent_teams/messager/hybrid.py:L1-L20`
+
+### Agent Runtime
+
+- **租户隔离被显式关闭**: 中间件以 `require_tenant=False` 装载，代码注释直书"临时禁用租户验证，测试用"。多租户能力在当前代码状态下不成立。
+  - 证据: `agent-runtime/server/openjiuwen_runtime/server/main.py:L78-L79`、`agent-runtime/server/openjiuwen_runtime/server/middleware/tenant.py:L28-L45`
+- **镜像部署未实现**: `deploy_image` 在 SUBPROCESS 模式下直接抛 `NotImplementedError`。
+  - 证据: `agent-runtime/management/openjiuwen_runtime/management/manager.py:L197-L200`
+- **`NoOpDeployController`**: 自述"不部署，仅调试用"，`deploy` / `delete` 均返回空。
+  - 证据: `agent-runtime/management/openjiuwen_runtime/management/session/runtime.py:L29-L40`
+- **A2A 全局 bootstrap 是空实现**: LEADER 选举后的全局初始化只打一行日志即标记 ready，协调框架已就位但没有实际任务。
+  - 证据: `agent-runtime/applications/a2a_service/app.py:L238-L239`
+- **`applications/llm_agent`**: 与其他 application 并列存在，但完成度需核实。
+  - 证据: `agent-runtime/applications/llm_agent/` 目录
+
+### Agent Memory
+
+- **多个"中心"包只有占位类**: `alertcenter` / `taskcenter` / `monitoring` / `installation` 四个包各自仅含 1 个 Java 文件，与 `configcenter`（41 个）、`logcenter`（27 个）的实现密度完全不在一个量级。
+  - 证据: `agent-memory/agent-memory-platform/platform/src/main/java/com/openjiuwen/memory/alertcenter/`、`taskcenter/`、`monitoring/`、`installation/`
+- **记忆内核能力缺口被显式登记**: `MemoryEngineClient` 中有 28 处 `GapException` 抛出点，类注释明确说明"现可实现的端点全部对应线上 :8516 的 10 个接口；缺口方法以 default 方法抛 GapException"。删除类接口（按 id / 按 user_id / 批量）目前全部不可用。
+  - 证据: `agent-memory/agent-memory-platform/platform/src/main/java/com/openjiuwen/memory/common/client/MemoryEngineClient.java:L23`、`L45-L55`
+- **端口口径不统一**: 类注释提到 `:8516`，`application.yml` 配的下游是 `:8000`，jiuwenswarm 侧默认又是 `:8137`。三者需要确认哪个是当前正确拓扑。
+  - 证据: `agent-memory/agent-memory-platform/platform/src/main/java/com/openjiuwen/memory/common/client/MemoryEngineClient.java:L23`、`agent-memory/agent-memory-platform/platform/src/main/resources/application.yml:L35`、`jiuwenswarm/jiuwenswarm/resources/config.yaml:L205-L206`
+
+### Agent Studio
+
+- **`studio-space` 未纳入聚合构建**: `backend/pom.xml` 的 `<modules>` 只列了 storage / common / manager / manager-api / manager-service 五个模块，`studio-space` 虽有完整源码却不在其中，默认构建不会产出该模块。
+  - 证据: `agent-studio/backend/pom.xml:L16-L22`
+
+### Agent Protocol
+
+- **A2A C++ SDK 存在明确的未实现字段**: `creatAt`（且拼写有误）、`lastModified`、`createdAt`、`index` 等字段在头文件中被直接标注 `// not implemented`。以这些字段做协议对接会得到空值。
+  - 证据: `agent-protocol/A2A/cpp-sdk/include/types.h:L166-L167`、`L187`、`L219`
+- **`MethodNotImplementedError`**: SDK 内建了"服务端未实现该方法"的错误类型，说明协议面并未要求全量实现。
+  - 证据: `agent-protocol/A2A/cpp-sdk/include/error.h:L88`
+
+### JiuwenSwarm
+
+- **三个重要特性默认全关**: `a2ui`（前端协议）、`symphony`（能力资产）、`enable_swarmflow`（团队流程编排）在默认配置中均为 `false`，属于已落代码但未默认启用的能力。
+  - 证据: `jiuwenswarm/jiuwenswarm/resources/config.yaml:L13`、`L20`、`L1222`
+- **内嵌的 A2X Registry 客户端已与上游漂移**: 见 §3.4，7 个文件全部与 `agent-protocol` 版本存在差异，需确认哪一份是权威实现。
+  - 证据: `jiuwenswarm/jiuwenswarm/agents/harness/team/a2x/client/client.py`
+
+### DeepSearch
+
+- **`codesearch/` 是空目录**: 仅含 `.gitkeep`，代码检索能力尚未开始实现。
+  - 证据: `deepsearch/codesearch/.gitkeep`
+- **状态校验链路有两处未实现分支**: `validate_new_state.py` 中两处 `raise NotImplementedError`，位于校验主流程内。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/algorithm/search_nodes/validate_new_state.py:L268`、`L332`
+
+### Agent Tools
+
+- **`reward_tool` 无后端实现**: 目录下只有 `index.html` / `test.html` / `run-tests.js` / `test-runner.bat`，Python 文件数为 0，即只有前端测试壳，没有可被 Agent 调用的工具实现。
+  - 证据: `agent-tools/reward_tool/index.html`、`agent-tools/reward_tool/run-tests.js`
+- **协议层完全缺席**: 该组件不含任何 MCP / A2A / ACP 实现，也不被其他组件依赖，其在生态中的定位需要确认。
+  - 证据: 见 §3.8
+
+### SkillHub
+
+- **Playground 依赖外部独立进程**: marketplace 只做 HTTP 代理，若 `skill-runner`（默认 `:8900`）未部署则 Playground 全链路不可用；每日配额默认 20 且 0 表示不限。
+  - 证据: `skillhub/marketplace/plugins_market/core/config.py:L396-L402`
+
+### JiuwenSymbiosis
+
+- **`target_skill` 恒为 `<unresolved>`**: 单元测试直接断言"target_skill 永远是 unresolved"，说明轨迹反馈生成的补丁尚无法定位到具体技能，该链路处于占位状态。
+  - 证据: `jiuwensymbiosis/tests/unit_tests/trace_feedback/test_patches.py:L128-L131`
+
+### Relay
+
+- **`SymlinkManager` 是显式的 no-op 桩**: 文件头注释直书 "no-op stubs"，但 `SkillUpdateService` 仍在调用 `createProviderSymlinks`，即技能到 Provider 的挂载实际上没有发生。
+  - 证据: `relay/packages/api/src/domains/agents/services/skillhub/SymlinkManager.ts:L8`、`relay/packages/api/src/domains/agents/services/skillhub/SkillUpdateService.ts:L10`
+- **多项安全相关开关在示例配置中默认放开**: 共享状态预检被跳过、Python 文件工具不限制路径且允许访问隐藏文件、cron 工具被禁用。这些是"为便于本地开发"还是既定形态，需要确认。
+  - 证据: `relay/.env.example:L225`、`L237`、`L260-L261`
+- **`SessionSealer`**: 存在完整类定义与 `ISessionSealer` 接口，但其在整体会话生命周期中的启用条件与完成度需要进一步核实。
+  - 证据: `relay/packages/api/src/domains/agents/services/session/SessionSealer.ts:L80`
