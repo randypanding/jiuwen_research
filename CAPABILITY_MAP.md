@@ -888,3 +888,346 @@ infer_router：FastAPI / uvicorn / pydantic(-settings) / httpx / loguru / promet
 #### 关键外部依赖
 
 核心依赖 `openjiuwen[claude,codex] @ git+https://gitcode.com/openJiuwen/agent-core.git@develop`（`jiuwenswarm/pyproject.toml:L20`），即直接以 Git 依赖方式绑定 agent-core 的 develop 分支；传输与服务层用 `websockets>=12.0`、`fastapi>=0.115`、`uvicorn[standard]>=0.30`、`pydantic>=2.0`；向量与持久化用 `chromadb`、`pgvector`、`faiss-cpu`、`sqlite-vec==0.1.6`、`aiosqlite`；生态 SDK 含 `skillnet-ai==0.0.16`、`a2ui-agent-sdk==0.2.1`、`google-genai`、可选 `jiuwenswarm-tui`、`pywebview`（`jiuwenswarm/pyproject.toml:L14-L102`）。
+
+---
+
+### 2.9 DeepSearch
+
+仓库路径: `deepsearch/`（实际 Python 工程位于嵌套目录 `deepsearch/deepsearch/`；`deepsearch/codesearch/` 仅含 `.gitkeep`）
+
+包名 `openjiuwen-deepsearch`（`deepsearch/deepsearch/pyproject.toml:L2`），未声明 `[project.scripts]`；入口为独立 CLI `main.py`、FastAPI 服务 `server/main.py` 与遥测包装 `run_main_with_telemetry.py`。
+
+#### 核心功能
+
+- **树搜索式深度研究循环**：init-state → find-action → run-action 三段式代理循环，`find_action` 通过提示模板产出 `action_proposals` 并赋方向性打分。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/algorithm/search_nodes/find_action.py:L80-L194`
+- **查询理解 / 意图识别**：以函数调用工具把查询归类为对比、分类、趋势判断、推荐、评估等任务类型，并抽取时间范围。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/algorithm/query_understanding/intent_recognition.py:L34-L559`
+- **九种 Web 搜索后端**：`tavily`、`google`/`serper`、`xunfei`、`petal`、`bocha`、`jina`、`perplexity`、`pubmed`、`arxiv` 静态注册于同一映射表。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/framework/openjiuwen/tools/web_search.py:L34-L46`
+- **搜索工具批量化与磁盘缓存**：查询列表并发 `asyncio.gather`，结果按查询串写入 JSONL 缓存。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/algorithm/search_tools/web_search_tool.py:L90-L130`
+- **网页抓取与 LLM 结构化抽取**：抓取交由可插拔 provider（当前仅注册 `jina`），再用 LLM 抽出 `{evidence, summary}`；上下文超限时最多 4 轮逐步截断（每轮缩至 80%）。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/algorithm/search_tools/web_fetch_tool.py:L158-L244`
+- **引用溯源流水线（source_trace）**：引用校验、来源匹配、域名到权威源映射、行内引用注入与推理式隐含引用补全，三个开关默认全开。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L319-L321`、`L441-L442`
+- **报告生成与导出**：大纲分节写作 + 文档预过滤/压缩，支持 DOCX、PDF 与含 LaTeX 公式的 HTML 导出。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L311-L316`、`deepsearch/deepsearch/pyproject.toml:L24-L26`、`deepsearch/deepsearch/pyproject.toml:L37-L38`
+- **沙箱化图表生成**：在受限沙箱内执行 LLM 生成的 matplotlib/seaborn 代码，可选 VLM 迭代修正（默认关闭，最多 3 轮）。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L364-L365`
+- **SSE 流式进度事件与人在回路**：`POST /api/v1/agent/deepsearch/run/` 返回 `text/event-stream`，生产协程投递事件到队列，支持 `waiting_user_input` 暂停与 `cancel` 取消。
+  - 证据: `deepsearch/deepsearch/server/routers/deepsearch_run.py:L566-L708`
+- **本地知识库 / RAG**：文档上传、切分、向量化后存入 Milvus（复用 agent-core 的 `simple_knowledge_base`），检索支持 dense / sparse / hybrid。
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/framework/openjiuwen/tools/search_api/native_local_search_api/api_wrapper.py:L14-L16`、`deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L239-L242`
+
+#### 配置选项
+
+进程内配置全部建模为 Pydantic `BaseModel`（非 `BaseSettings`），服务级配置通过 `python-dotenv` 从 `.env` 读取。
+
+| 配置项名 | 默认值 | 说明 | 证据 |
+| --- | --- | --- | --- |
+| `LLMConfig.model_name` | `""` | 模型名 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L13` |
+| `LLMConfig.model_type` | `openai` | 提供方适配器：`openai` / `siliconflow` | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L14` |
+| `LLMConfig.timeout` | `600` | 单次 LLM 请求超时（秒） | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L22` |
+| `LLMConfig.max_tries` | `4` | LLM 调用重试次数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L23` |
+| `WebSearchEngineConfig.search_engine_name` | `tavily` | 生效的 Web 搜索后端 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L31-L44` |
+| `WebSearchEngineConfig.max_web_search_results` | `5`（1–10） | 单次查询最大结果数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L45` |
+| `LocalSearchEngineConfig.search_engine_name` | `openapi` | 本地检索后端：`openapi`/`custom`/`native` | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L84` |
+| `PerQuestionParams.max_workers` | `5` | 单问题并发协程数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L129` |
+| `PerQuestionParams.time_limit` | `4800` | 单问题墙钟超时（秒） | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L137` |
+| `PerQuestionParams.actions_explored_limit` | `200` | 最大探索 action 数（200＝不限） | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L139` |
+| `FindActionAgentConfig.action_proposals_limit` | `5` | 单次 LLM 产出的最大 action 提案数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L210` |
+| `FindActionAgentConfig.action_pool_depleted_strategy` | `dependent_retry` | action 池枯竭时的重试策略 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L211-L218` |
+| `RetrievalSettingsConfig.top_k` | `3` | 检索返回条数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L239` |
+| `RetrievalSettingsConfig.mode` | `hybrid` | 检索模式：dense/sparse/hybrid | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L242` |
+| `StateCreationAgentConfig.max_llm_calls_per_run` | `100` | 单次 state creation 的最大 LLM 调用数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L259` |
+| `StateCreationAgentConfig.context_limit_reached_strategy` | `reduced_retrieval_request` | 上下文超限处置策略 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L260-L277` |
+| `AgentConfig.execute_mode` | `commercial` | 执行模式：commercial / general | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L299-L300` |
+| `AgentConfig.execution_method` | `parallel` | 编排方式：dependency_driving / parallel / hybrid | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L301-L308` |
+| `AgentConfig.outliner_max_section_num` | `10`（上限 15） | 报告大纲最大章节数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L311-L316` |
+| `AgentConfig.outline_interaction_max_rounds` | `3`（上限 100） | 大纲人机交互轮次上限 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L318` |
+| `AgentConfig.source_tracer_*_switch` | 均为 `True` | 溯源、新增引用生成、溯源推理三个开关 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L319-L321` |
+| `AgentConfig.info_collector_search_method` | `web` | 信息来源：web / local / all | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L326` |
+| `AgentConfig.search_mode` | `research` | 顶层模式：research / search / react | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L340-L346` |
+| `AgentConfig.web_search_max_qps` | `0`（不限流） | 搜索引擎调用 QPS 限速 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L353` |
+| `AgentConfig.vlm_chart_generator_enable` | `False` | VLM 迭代生成图表开关 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L364` |
+| `AgentConfig.vlm_chart_generator_max_iterations` | `1`（上限 3） | VLM 图表迭代轮数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L365` |
+| `ServiceConfig.workflow_execution_timeout` | `7200` | 工作流总超时（秒） | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L394` |
+| `ServiceConfig.workflow_max_plan_executed_num` | `2` | 最大计划执行数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L396` |
+| `ServiceConfig.planner_max_step_num` | `3` | 规划最大步骤数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L408` |
+| `ServiceConfig.info_collector_max_research_loops` | `2` | 每个计划步的外层研究循环数 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L417` |
+| `ServiceConfig.source_tracer_citation_verify_max_concurrency_num` | `30` | 引用校验并发上限 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L441` |
+| `ServiceConfig.source_tracer_citation_verify_batch_size` | `10`（1–20） | 引用校验批大小 | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L442` |
+| `ServiceConfig.llm_timeout` | `300` | 全局 LLM 超时（秒） | `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L453` |
+| `HOST` / `BACKEND_PORT`（环境变量） | `0.0.0.0` / `8000`（`.env.example` 给 `6000`） | uvicorn 绑定地址与端口 | `deepsearch/deepsearch/server/main.py:L139-L140`、`deepsearch/deepsearch/.env.example:L10-L13` |
+| `WORKER_NUM`（环境变量） | `1` | uvicorn worker 数 | `deepsearch/deepsearch/server/main.py:L144` |
+| `SERVICE_MODE`（环境变量） | `develop` | develop（明文密钥）/ product（KMS 密钥） | `deepsearch/deepsearch/.env.example:L20` |
+| `LLM_SSL_VERIFY`（环境变量） | `False` | LLM 调用是否校验 TLS | `deepsearch/deepsearch/.env.example:L23` |
+| `DB_TYPE`（环境变量） | `sqlite` | 数据库驱动；`CHECKPOINTER_TYPE=redis` 时必须为 mysql | `deepsearch/deepsearch/.env.example:L47-L48` |
+| `MILVUS_HOST`（环境变量） | `localhost` | Milvus 连接 | `deepsearch/deepsearch/.env.example:L63` |
+| `HUAWEICLOUD_KMS_ENABLED`（环境变量） | `false` | 华为云 KMS 解密开关 | `deepsearch/deepsearch/.env.example:L69` |
+| `CHECKPOINTER_TYPE`（环境变量） | `in_memory` | 检查点：in_memory / persistence / redis | `deepsearch/deepsearch/.env.example:L72-L73` |
+
+#### 扩展点
+
+- **扩展点 A: `BaseWebFetchProvider` 抓取提供方 Protocol**
+  - 接口定义: `deepsearch/deepsearch/openjiuwen_deepsearch/framework/openjiuwen/tools/fetch_api/base.py:L1-L13`（`provider_name` + `fetch_page(url)`）
+  - 注入方式: 在 `fetch_provider_mapping` 字典登记新键，再把 `web_fetch_provider_config.provider_name` 指向它
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/framework/openjiuwen/tools/fetch_api/registry.py:L10-L47`
+- **扩展点 B: 外部/自定义搜索工具（运行时动态导入）**
+  - 接口定义: `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L103-L113`（`custom_web_search_file` + `custom_web_search_func`）
+  - 注入方式: `load_external_search_tools()` 以 `importlib.util.spec_from_file_location` + `exec_module` 从任意文件路径加载可调用对象并插入引擎映射表
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/framework/openjiuwen/tools/search_api/external_tool/tool.py:L14-L60`
+- **扩展点 C: `BaseRetriever` 抽象基类**
+  - 接口定义: `deepsearch/deepsearch/openjiuwen_deepsearch/algorithm/search_tools/retrieval/base_retriever.py:L25-L33`
+  - 注入方式: 子类（或继承 `MilvusBaseRetriever`）后作为 `MilvusConfig.retriever_class` 传入 `search_workflow_milvus_config`
+  - 证据: `deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L183-L185`、`deepsearch/deepsearch/openjiuwen_deepsearch/config/config.py:L349`
+- **扩展点 D: `AbstractEmbedder` 抽象基类**
+  - 接口定义: `deepsearch/deepsearch/openjiuwen_deepsearch/algorithm/search_tools/retrieval/embedder.py:L63-L73`（抽象方法 `get_query_instruction` / `encode`）
+  - 注入方式: 实现后传入 `MilvusBaseRetriever` 子类
+- **扩展点 E: `LLMModelFactory` 提供方映射**
+  - 接口定义: `deepsearch/deepsearch/openjiuwen_deepsearch/framework/openjiuwen/llm/llm_model_factory.py:L22-L50`
+  - 注入方式: 在 `provider_map` 中新增映射（当前仅 `openai` → `OpenAI`、`siliconflow` → `SiliconFlow`），并确保 agent-core 的 `Model` 支持该客户端类型
+- **扩展点 F: 搜索引擎运行时上下文注册**
+  - 接口定义: `deepsearch/deepsearch/openjiuwen_deepsearch/framework/openjiuwen/tools/web_search.py:L53-L73`
+  - 注入方式: 通过 `ContextVar` 在会话级注册搜索引擎实例，`get_web_search_api_wrapper()` 调用时解析；可同时注册多个引擎
+
+#### 关键外部依赖
+
+以精确固定版本方式依赖 agent-core：`openjiuwen==0.1.10.post3`（`deepsearch/deepsearch/pyproject.toml:L27`）；其余含 `Jinja2==3.1.6`（提示模板）、`json-repair==0.58.0`（LLM JSON 容错解析）、`tenacity==9.1.2`（重试）、`aiolimiter==1.1.0`（QPS 限流）、`python-docx` / `pypdfium2` / `latex2mathml` + `mathml2omml-as`（报告导出）、`matplotlib` + `seaborn`（图表）、`pyvis` + `networkx`（知识图可视化）、`beautifulsoup4`（HTML 解析）（`deepsearch/deepsearch/pyproject.toml:L21-L38`）。
+
+---
+
+### 2.10 JiuwenSymbiosis
+
+仓库路径: `jiuwensymbiosis/`（Python 包位于嵌套目录 `jiuwensymbiosis/jiuwensymbiosis/`）
+
+定位为「具身智能 / 机器人本体接入层」：把 agent-core 的 DeepAgent 与真实机械臂（Piper、SO-101）、RGB-D 相机、开放词表视觉检测与语音前端连接起来。三个 console_scripts：`piper-pick-demo`、`jiuwensymbiosis-replay`、`jiuwensymbiosis-gui`（`jiuwensymbiosis/pyproject.toml:L79-L82`）。
+
+#### 核心功能
+
+- **双执行模式（慢 Agent / 快编译）**：`exec_mode="agent"` 时经 `create_deep_agent` 每步 LLM 决策；`exec_mode="fast"` 时用 1 次 LLM 调用把任务编译成扁平 JSON 动作序列，之后纯执行不再调用 LLM。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/agent/run.py:L85-L238`
+- **一次性技能序列编译器**：把用户任务 + 所有候选技能的完整 SKILL.md 一并送入 LLM，校验返回 JSON（op 必须在 `action_vocab` 内、`bind` 引用可解析），失败时带纠错反馈最多重试 4 次。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/agent/fast/planner.py:L196-L345`
+- **SKILL.md 驱动的技能目录（无 Python 执行体）**：`SkillRegistry` 自动发现 `skills/` 下的 `SKILL.md`（内置 `visual_pick`、`visual_place`），整个工作流内联在 Markdown 中。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/agent/fast/registry.py:L67-L123`
+- **执行轨迹记录与回放（TraceRail）**：挂 `before_invoke`/`before_tool_call`/`after_tool_call`/`on_tool_exception`/`after_invoke` 五个钩子，落盘 JSON 轨迹（含步序、工具名、入参、成功与否、耗时、位姿观测、帧图路径、rail 事件）；CLI 支持文本与自包含 HTML 回放。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/agent/trace.py:L1-L100`、`jiuwensymbiosis/jiuwensymbiosis/cli.py:L75-L216`
+- **离线失败聚类与技能补丁建议**：加载轨迹语料 → 抽取失败证据（含前后 N 步上下文）→ 数字掩码 + 参数分桶构建失败签名 → 去重聚类 → 生成确定性文本 diff 建议（不调用 LLM）。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/trace_feedback/analysis.py:L108-L344`、`jiuwensymbiosis/jiuwensymbiosis/trace_feedback/patches.py:L52-L128`
+- **在线诊断注入（DiagnosisRail）**：失败时构造「当前步参数与错误 / 相关近邻步因果链 / 系统状态」三段式诊断，在 `on_tool_exception` 暂存、`before_model_call` 作为 `UserMessage` 冲刷，超长时按优先级丢弃分段。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/rails/diagnosis.py:L41-L332`
+- **视觉反馈闭环（VisualFeedbackRail）**：运动/抓取类工具调用后抓取最新 RGB 帧，JPEG + base64 后以多模态 `UserMessage`（text + image_url）回灌模型，单次 invoke 最多 8 帧，按 `robot_tool` 标签（`motion`/`grasp`）门控。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/rails/visual_feedback.py:L79-L303`
+- **开放词表检测流水线（GroundingDINO + SAM2）**：FastAPI 边车暴露 `POST /segment`，文本→框→掩膜，GPU 访问用 `asyncio.Semaphore(1)` 串行化；上层做质心求取、XY 修正与抓/放高度钳制。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/serving/grounding_dino_sam2_server.py:L65-L82`、`jiuwensymbiosis/jiuwensymbiosis/api/mixins.py:L315-L421`
+- **实时伺服闭环 + 解耦感知跟踪器**：`BackgroundTracker` 在守护线程跑检测并以 `staleness_s` 过滤陈旧目标，`ServoBinding` 把最新位姿经 `SafetyRail.validate_pose` 后按 `control_hz` 下发 `servo_to_flange`。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/agent/fast/realtime/tracking.py:L32-L80`、`jiuwensymbiosis/jiuwensymbiosis/agent/run.py:L114-L137`
+- **安全护栏与自动恢复**：`SafetyRail` 在 `goto_xyzr`/`goto_pose`/`move_joint` 执行前校验 Z 下限、XY 工作空间与关节限位，违规抛 `ValueError` 让模型看到工具错误；`RecoveryRail` 在运动/抓取异常时自动回 Home 并松开夹爪。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/rails/safety.py:L61-L326`、`jiuwensymbiosis/jiuwensymbiosis/rails/recovery.py:L118-L283`
+- **语音前端**：唤醒词门控 + 能量/WebRTC VAD + FunASR `paraformer-zh` 识别 + 可选 ChatTTS 合成。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/voice/config.py:L22-L102`
+- **NiceGUI 浏览器界面**：绑定 `127.0.0.1` 单实例，含任务执行（可取消）、轨迹回放、YAML 配置编辑、诊断与手眼标定工具页。
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/gui/app.py:L23-L24`、`jiuwensymbiosis/jiuwensymbiosis/gui/__main__.py:L142-L173`
+
+#### 配置选项
+
+全部配置以 **dataclass** 建模（非 pydantic BaseSettings），通过 `from_dict` / `from_yaml` 载入。
+
+| 配置项名 | 默认值 | 说明 | 证据 |
+| --- | --- | --- | --- |
+| `ModelSpec.provider` | `OpenAI` | agent-core Provider 名 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L72` |
+| `ModelSpec.api_base` | `http://127.0.0.1:8110/v1` | LLM 端点（不含 `/chat/completions`） | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L73` |
+| `ModelSpec.api_key` | `EMPTY` | 免鉴权端点可留空 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L74` |
+| `ModelSpec.model_name` | `Qwen/Qwen3-VL-32B-Instruct` | 默认多模态模型 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L75` |
+| `ModelSpec.temperature` / `max_tokens` | `0.3` / `2048` | 采样温度与输出上限 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L76-L77` |
+| `ModelSpec.verify_ssl` | `False` | 自签名开发端点默认不校验 TLS | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L78` |
+| `RobotAgentConfig.mode` | `hybrid` | 工具分发模式：tool / code / hybrid | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L191` |
+| `RobotAgentConfig.enable_visual_feedback` | `True` | 有相机能力时挂 `VisualFeedbackRail` | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L195` |
+| `RobotAgentConfig.enable_safety` | `True` | 有运动能力时挂 `SafetyRail` | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L196` |
+| `RobotAgentConfig.enable_recovery` | `True` | 有运动/抓取能力时挂 `RecoveryRail` | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L197` |
+| `RobotAgentConfig.enable_skill` | `False` | 启用 `SkillUseRail` + `RobotControlTool` | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L198` |
+| `RobotAgentConfig.max_iterations` | `15` | Agent 循环迭代上限 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L201` |
+| `RobotAgentConfig.strict_capabilities` | `False` | 能力不匹配时抛错还是仅告警 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L203` |
+| `RobotAgentConfig.enable_tracing` | `False` | 挂 `TraceRail` 记录 JSON 轨迹 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L205` |
+| `RobotAgentConfig.trace_max_entries` / `trace_max_frames` | `200` / `50` | 单条轨迹步数与帧数上限 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L206-L207` |
+| `RobotAgentConfig.trace_save_frames` | `False` | 是否落盘 JPEG 帧 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L208` |
+| `RobotAgentConfig.enable_diagnosis` | `False` | 挂 `DiagnosisRail`（需 `enable_tracing=True`） | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L213` |
+| `RobotAgentConfig.diagnosis_max_chars` | `1500` | 诊断消息软字符上限 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L214` |
+| `RobotAgentConfig.diagnosis_history_steps` | `3` | 因果链回溯步数 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L215` |
+| `RobotAgentConfig.log_level` / `log_dir` | `INFO` / `./logs` | 日志级别与目录（None＝仅控制台） | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L218-L224` |
+| `RobotAgentConfig.parallel_tool_calls` | `False` | 是否允许并发工具分发 | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L225` |
+| `RobotAgentConfig.exec_mode` | `agent` | `agent`（逐步 LLM）/ `fast`（编译一次 + 伺服） | `jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L230` |
+| `PiperConfig.can_port` | `can_left` | CAN 总线端口 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L43` |
+| `PiperConfig.move_speed` | `50` | 移动速度百分比 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L45` |
+| `PiperConfig.tool_offset_mm` | `135.8` | 工具尖端相对法兰的 -Z 偏置 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L47` |
+| `PiperConfig.home_lift_mm` | `250.0` | Home 位抬升高度 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L51` |
+| `PiperConfig.z_min_safe_mm` | `50.0` | 尖端坐标系 Z 安全下限 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L57` |
+| `PiperConfig.camera_resolution` | `(640, 480)` | RealSense 采集分辨率 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L74` |
+| `PiperConfig.gripper_open_mm` | `70.0` | 「张开」指令对应的夹爪宽度 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L78` |
+| `PiperConfig.grasp_z_offset_mm` | `-25.0` | 相对检测顶面的抓取下探量 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L97` |
+| `PiperConfig.place_z_offset_mm` | `75.0` | 相对目标顶面的放置高度 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L107` |
+| `DetectorServerConfig.url` | `http://127.0.0.1:8114` | 检测服务地址 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L26` |
+| `DetectorServerConfig.spawn` | `True` | 自动拉起检测边车 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L27` |
+| `DetectorServerConfig.startup_timeout_s` | `300.0` | 边车启动超时 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L31` |
+| `DetectorServerConfig.gdino_model_id` | `IDEA-Research/grounding-dino-base` | GroundingDINO 模型 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L33` |
+| `DetectorServerConfig.sam2_model_id` | `facebook/sam2.1-hiera-large` | SAM2 模型 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L34` |
+| `DetectorServerConfig.box_threshold` / `text_threshold` | `0.35` / `0.25` | 检测框与文本 grounding 阈值 | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L35-L36` |
+| `ServoConfig.control_hz` | `30.0` | 伺服控制频率 | `jiuwensymbiosis/jiuwensymbiosis/agent/fast/realtime/servo.py:L56` |
+| `ServoConfig.max_lin_step_mm` | `6.0` | 单拍线性位移限幅 | `jiuwensymbiosis/jiuwensymbiosis/agent/fast/realtime/servo.py:L57` |
+| `ServoConfig.pos_tol_mm` | `4.0` | 到位判定容差 | `jiuwensymbiosis/jiuwensymbiosis/agent/fast/realtime/servo.py:L59` |
+| `ServoConfig.timeout_s` | `20.0` | 无进展中止超时 | `jiuwensymbiosis/jiuwensymbiosis/agent/fast/realtime/servo.py:L65` |
+| `ServoConfig.absolute_timeout_s` | `60.0` | 追踪移动目标的硬上限 | `jiuwensymbiosis/jiuwensymbiosis/agent/fast/realtime/servo.py:L68` |
+| `ServoConfig.lost_target_grace_s` | `3.0` | 目标丢失宽限期 | `jiuwensymbiosis/jiuwensymbiosis/agent/fast/realtime/servo.py:L72` |
+| `VoiceConfig.asr_backend` / `asr_model` / `asr_device` | `funasr` / `paraformer-zh` / `cuda:0` | 语音识别后端 | `jiuwensymbiosis/jiuwensymbiosis/voice/config.py:L61-L63` |
+| `VoiceConfig.audio_backend` / `sample_rate` | `pulse` / `16000` | 采集后端与采样率 | `jiuwensymbiosis/jiuwensymbiosis/voice/config.py:L68-L69` |
+| `VoiceConfig.silence_frames` | `25`（≈750 ms） | 断句所需拖尾静音帧数 | `jiuwensymbiosis/jiuwensymbiosis/voice/config.py:L71` |
+| `VoiceConfig.vad_aggressiveness` | `2` | WebRTC VAD 灵敏度 0–3 | `jiuwensymbiosis/jiuwensymbiosis/voice/config.py:L76` |
+| `VoiceConfig.tts_backend` | `null`（不发声） | TTS 实现：null / chattts | `jiuwensymbiosis/jiuwensymbiosis/voice/config.py:L81` |
+| `JIUWENSYMBIOSIS_WORKSPACE`（环境变量） | 无 | 工作区目录（优先级低于显式参数） | `jiuwensymbiosis/jiuwensymbiosis/agent/builder.py:L65-L74` |
+| `JIUWEN_LLM_PROXY`（环境变量） | 由被清空的 `HTTP_PROXY` 推导 | LLM 调用专用代理（进程内清空通用代理变量避免污染机器人本地通信） | `jiuwensymbiosis/jiuwensymbiosis/__init__.py:L16-L31` |
+| `CAMERA_SERIAL`（环境变量） | 无 | 覆盖 `PiperConfig.camera_serial` | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L161-L162` |
+| `GDINO_MODEL_ID` / `SAM2_MODEL_ID`（环境变量） | 无 | 覆盖检测模型 id | `jiuwensymbiosis/jiuwensymbiosis/adapters/piper/config.py:L237-L238` |
+| `JIUWEN_VIS_TOPK`（环境变量） | `32` | `/segment` 返回的最大检测数 | `jiuwensymbiosis/jiuwensymbiosis/serving/grounding_dino_sam2_server.py:L81-L82` |
+
+#### 扩展点
+
+- **扩展点 A: `@robot_tool` 装饰器（暴露机器人动作为 LLM 工具）**
+  - 接口定义: `jiuwensymbiosis/jiuwensymbiosis/api/decorators.py:L140-L178`（`robot_tool(name, desc, capability, input_params, tags)`，把 `ToolMeta` 挂到 `f.__robot_tool__`）
+  - 注入方式: 在 `BaseRobotApi` 子类方法上加装饰器，JSON-Schema 由函数签名自动推导；构建期扫描 `type(api).__mro__` 收集
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/api/decorators.py:L109-L137`、`jiuwensymbiosis/jiuwensymbiosis/tools/robot_control_tool.py:L35-L80`
+- **扩展点 B: `BaseRobotEnv` 抽象基类（接入新机器人本体）**
+  - 接口定义: `jiuwensymbiosis/jiuwensymbiosis/env/base.py:L78-L288`（抽象方法 `connect` / `disconnect` / `get_observation`，类级 `capabilities: frozenset[str]`）
+  - 注入方式: 子类声明 `KNOWN_CAPABILITIES` 中的能力串并实现三个抽象方法，`__init_subclass__` 在类定义期即校验能力名合法性
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/env/base.py:L37-L51`、`L86-L94`
+- **扩展点 C: 驱动 Protocol 族（`RobotDriver`/`JointDriver`/`ServoDriver`/`CameraDriver`/`SuctionDriver`/`GripperDriver`/`VisionDriver`）**
+  - 接口定义: `jiuwensymbiosis/jiuwensymbiosis/env/protocol.py:L46-L202`（全部 `@runtime_checkable` Protocol）
+  - 注入方式: 结构化实现即可（无需继承），把对象赋给 `env.low_level`；`_require_driver()` 在调用点做 `isinstance` 能力门控
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/env/base.py:L219-L224`
+- **扩展点 D: 能力 Mixin（`MotionMixin`/`JointMotionMixin`/`SuctionMixin`/`ParallelGripperMixin`/`VisionMixin`）**
+  - 接口定义: `jiuwensymbiosis/jiuwensymbiosis/api/mixins.py:L103-L454`
+  - 注入方式: 组合继承 `BaseRobotApi` + 所需 Mixin；`VisionMixin` 唯一必须重写的是 `_project_pixel_to_base_raw`（厂商相关像素→基座投影）
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/api/mixins.py:L266-L274`、`jiuwensymbiosis/jiuwensymbiosis/api/base.py:L34-L43`
+- **扩展点 E: `SkillRegistry`（SKILL.md 技能扩展）**
+  - 接口定义: `jiuwensymbiosis/jiuwensymbiosis/agent/fast/registry.py:L67-L123`（`register` / `register_dir` + 全局 `register_skill_dir`）
+  - 注入方式: 在 `run_fast_task` 前调用 `register_skill_dir(Path("/my/skills"))`，编译器自动纳入所有含 `SKILL.md` 的子目录
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/agent/fast/planner.py:L281-L292`
+- **扩展点 F: `_RailRegistry` 动态 Rail 装配**
+  - 接口定义: `jiuwensymbiosis/jiuwensymbiosis/agent/builder.py:L97-L173`（`RailConfig` 含 `rail_class_path` 全限定串 + `required_flags` + `required_capabilities`，经 `importlib.import_module` 动态载入）
+  - 注入方式: ①`RobotAgentConfig.extra_rails` 传实例；②直接向 `_RailRegistry._rails` 追加；③把 `rail_class_path` 指向自定义模块
+  - 证据: `jiuwensymbiosis/jiuwensymbiosis/agent/builder.py:L122-L148`、`jiuwensymbiosis/jiuwensymbiosis/agent/config.py:L200`
+- **扩展点 G: `TraceEventSink` Protocol（跨 Rail 轨迹打点）**
+  - 接口定义: `jiuwensymbiosis/jiuwensymbiosis/agent/trace.py:L62-L100`（`record_rail_event` / `record_rail_event_at_step`）
+  - 注入方式: 任意实现该协议的对象作为 `trace_sink=` 传给 `SafetyRail` / `RecoveryRail` / `VisualFeedbackRail`；`TraceRail` 是标准实现，自定义 sink 走鸭子类型
+
+#### 关键外部依赖
+
+核心依赖 `openjiuwen>=0.1.13`（`jiuwensymbiosis/pyproject.toml:L15`），且所有 agent-core 导入被收敛到单一收口文件 `jiuwensymbiosis/jiuwensymbiosis/agent/abstractions.py:L13-L24`（`Model`、`Tool`、`ToolCard`、`AgentRail`、`AgentCard`、`create_deep_agent`、`SkillUseRail`、`SubAgentConfig`、`ToolOutput`）；基础依赖 `numpy>=2`、`pydantic>=2`、`PyYAML>=6`、`scipy>=1.10`（`jiuwensymbiosis/pyproject.toml:L15-L20`）；可选 extras 分组含 `full`（`torch==2.8.0+cu128`、`torchvision`、`transformers>=5`、`pyrealsense2`、`opencv-python`、`fastapi`、`uvicorn`）、`piper`（`piper_sdk>=0.6.1`）、`so101`（`lerobot[feetech,kinematics]>=0.6.0,<0.7`，仅支持 Python≥3.12）、`voice`（`funasr`、`sounddevice`、`webrtcvad`）、`gui`（`nicegui>=2,<3`）（`jiuwensymbiosis/pyproject.toml:L22-L78`）。
+
+---
+
+### 2.11 Relay
+
+仓库路径: `relay/`（pnpm monorepo，根包名 `office-claw` v0.3.0，工作区 `packages/**`）
+
+以 TypeScript（Node ≥ 20）为主，7 个工作区包：`api`（Fastify HTTP 服务 + CLI）、`core`（Provider 插件注册表与 AgentService 类型）、`mcp-server`（stdio MCP 服务）、`shared`（Zod schema 与常量）、`web`（React 前端）、`plugin`（插件契约）、`sqlite-adapter`（SQLite 证据与调度后端）。
+
+> 注：`relay/.inner.env` 内含内部平台真实端点配置，本清单仅引用变量名，不复制其取值。
+
+#### 核心功能
+
+- **多 Provider 路由与协议翻译**：`ProviderProfileProtocol` 联合类型覆盖 `anthropic` / `openai` / `google` / `huawei_maas` / `acp`；每个插件通过 `ProviderBindingSpec` 声明协议与内建客户端身份。
+  - 证据: `relay/packages/core/src/agent/types.ts:L20`、`relay/packages/core/src/plugin/types.ts:L53-L60`
+- **Provider 插件注册表（含动态发现）**：显式 `register()` 与扫描 `node_modules` 中标记 `clowder.kind === 'provider'` 的 `@office-claw/provider-*` 包两条路径，显式注册优先级更高。
+  - 证据: `relay/packages/core/src/plugin/registry.ts:L17-L216`、`L128-L129`
+- **Anthropic 网关反向代理**：独立 Node HTTP 代理，从 `.office-claw/proxy-upstreams.json` 读上游映射，按 slug 前缀转发，对 429/529 与网络错误做感知 `Retry-After` 的指数退避重试。
+  - 证据: `relay/scripts/anthropic-proxy.mjs:L18-L53`、`L413-L434`
+- **Socket.IO 流式下发**：房间管理、取消广播与流投递；`StreamingHookLike` 暴露 `onStreamStart`/`onStreamChunk`/`onStreamEnd` 三个生命周期回调供外部平台连接器接管。
+  - 证据: `relay/packages/api/src/routes/messages.ts:L72-L78`、`L178-L229`
+- **回调令牌式 Agent 反向调用安全**：Agent 经 `/api/callbacks/*` 回调服务端，必须携带 `invocationId` + `callbackToken` 并由 `InvocationRegistry` 校验。
+  - 证据: `relay/packages/api/src/routes/callback-auth-schema.ts:L1-L12`
+- **用量计量**：`GET /api/usage/daily` 按 `X-Office-Claw-User` 维度聚合 token 消耗，带 60 秒 TTL 与 20 条 LRU 上限的内存缓存。
+  - 证据: `relay/packages/api/src/routes/usage.ts:L40-L84`、`relay/packages/core/src/agent/types.ts:L67-L87`
+- **技能体系（本地 + 远端 SkillHub）**：远端经 `TencentSkillHubService` 走 `TENCENT_SKILLHUB_API_BASE_URL`（默认 `https://lightmake.site`）做搜索/榜单/下载 ZIP，并用 JSZip 解包读取 `SKILL.md`；`SkillInstallManager` 负责落盘安装并另有独立的 `SKILLHUB_BASE_URL` 源。
+  - 证据: `relay/packages/api/src/domains/agents/services/skillhub/TencentSkillHubService.ts:L15-L18`、`relay/packages/api/src/domains/agents/services/skillhub/SkillInstallManager.ts:L20-L24`
+- **MCP 工具服务**：以 stdio MCP 传输暴露 callback / richBlockRules / schedule / memory / evidence / reflect / sessionChain / limb 等工具集，支持按名排除。
+  - 证据: `relay/packages/mcp-server/src/server-toolsets.ts:L37-L73`
+- **三层身份与鉴权**：OAuth 流程路由、`X-Office-Claw-User` 请求级身份解析、以及 Agent 回调令牌校验。
+  - 证据: `relay/packages/api/src/routes/callback-auth-schema.ts:L1-L12`
+- **外发连接器中枢**：统一 `IOutboundAdapter` 之下实现企业微信应用/群机器人、微信、飞书、钉钉、小艺（WebSocket 私有协议）等适配器，另有 GitHub 评审邮件（IMAP）监听器。
+  - 证据: `relay/packages/api/src/infrastructure/connectors/adapters/WeComAgentAdapter.ts:L144`、`relay/packages/api/src/infrastructure/email/GithubReviewWatcher.ts:L1-L40`
+- **持久化定时任务**：`TaskRunnerV2` 跑 cron 作业，默认 SQLite 持久化，治理校验失败时 30 秒后重试。
+  - 证据: `relay/packages/api/src/infrastructure/scheduler/TaskRunnerV2.ts:L367-L373`、`relay/.env.example:L193-L194`
+- **语音输入输出**：`/api/tts/synthesize`、`/stream`、`/resynthesize`、`/audio/:filename` 路由，ASR 走 Whisper 服务、TTS 走独立服务，均由开关控制。
+  - 证据: `relay/.env.example:L251-L256`
+- **JiuwenClaw Python 边车（relayclaw ACP Provider）**：拉起 `python -m jiuwenclaw.app_agentserver` 子进程，经本地 IPC 的 `FrameQueue` / `RelayClawConnection` 通信。
+  - 证据: `relay/packages/api/src/domains/agents/services/agents/providers/relayclaw-sidecar.ts:L441`、`L183`
+
+#### 配置选项
+
+| 配置项名 | 默认值 | 说明 | 证据 |
+| --- | --- | --- | --- |
+| `FRONTEND_PORT` | `3003` | 前端开发服务端口 | `relay/.env.example:L145` |
+| `API_SERVER_PORT` | `3004` | Fastify HTTP 端口 | `relay/.env.example:L146` |
+| `API_SERVER_HOST` | `127.0.0.1` | API 绑定地址 | `relay/packages/api/src/server-lifecycle.ts:L7-L14` |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:3004` | 前端访问的 API 基址 | `relay/.env.example:L147` |
+| `NEXT_PUBLIC_BRAND_NAME` | `OfficeClaw` | 界面品牌名 | `relay/.env.example:L148` |
+| `NEXT_PUBLIC_PROD_API_URL` / `NEXT_PUBLIC_PROD_FRONTEND_HOST` | `office-claw.com` / `app.office-claw.com` | 生产域名 | `relay/.env.example:L162-L163` |
+| `OFFICE_CLAW_API_HOST` | `https://api.office-claw.com` | 外链使用的规范 API 主机 | `relay/.env.example:L164` |
+| `PROD_CORS_ORIGIN` | `https://app.office-claw.com` | 生产 CORS 白名单来源 | `relay/.env.example:L168` |
+| `REDIS_PORT` | `6399` | 本地 Redis 端口 | `relay/.env.example:L180` |
+| `OFFICE_CLAW_EVIDENCE_PROVIDER` | `sqlite` | 证据库后端 | `relay/.env.example:L191` |
+| `OFFICE_CLAW_EVIDENCE_PROVIDER_MODULES` | `@openjiuwen/relay-storage-sqlite/evidence` | 证据后端模块路径 | `relay/.env.example:L192` |
+| `OFFICE_CLAW_SCHEDULER_PROVIDER` | `sqlite` | 调度持久化后端 | `relay/.env.example:L193` |
+| `OFFICE_CLAW_SCHEDULER_PROVIDER_MODULES` | `@openjiuwen/relay-storage-sqlite/scheduler` | 调度后端模块路径 | `relay/.env.example:L194` |
+| `OFFICE_CLAW_DISABLE_SHARED_STATE_PREFLIGHT` | `1` | 跳过多 Agent 共享 git 状态预检 | `relay/.env.example:L225` |
+| `JIUWENCLAW_DISABLE_CRON_TOOLS` | `1` | 关闭 Python 侧 cron 工具注册 | `relay/.env.example:L237` |
+| `ANTHROPIC_PROXY_ENABLED` | `0` | Anthropic 网关代理开关 | `relay/.env.example:L244` |
+| `ANTHROPIC_PROXY_MAX_RETRIES` | `3` | 代理上游重试次数 | `relay/scripts/anthropic-proxy.mjs:L51` |
+| `ANTHROPIC_PROXY_UPSTREAM_TIMEOUT_MS` | `60000` | 代理上游超时（毫秒） | `relay/scripts/anthropic-proxy.mjs:L52-L53` |
+| `ASR_ENABLED` / `TTS_ENABLED` | `0` / `0` | 语音识别与合成开关 | `relay/.env.example:L251-L252` |
+| `LLM_POSTPROCESS_ENABLED` | `0` | LLM 后处理开关 | `relay/.env.example:L253` |
+| `NEXT_PUBLIC_WHISPER_URL` | `http://localhost:9876` | Whisper ASR 端点 | `relay/.env.example:L255` |
+| `TTS_URL` | `http://localhost:9879` | TTS 合成端点 | `relay/.env.example:L256` |
+| `FILE_TOOLS_ALLOW_ANY_PATH` | `1` | Python 文件工具不限制路径 | `relay/.env.example:L260` |
+| `FILE_TOOLS_ALLOW_HIDDEN_FILES` | `1` | 允许访问隐藏文件 | `relay/.env.example:L261` |
+| `LLM_MAX_TOKENS` | `16384` | LLM 调用默认 token 上限 | `relay/.env.example:L264` |
+| `RELAY_TEAMS_CONFIG_DIR` | `~/.office-claw/.relay-teams` | relay-teams 日志根目录 | `relay/.env.example:L300` |
+| `TENCENT_SKILLHUB_API_BASE_URL` | `https://lightmake.site` | 远端 SkillHub API 基址 | `relay/packages/api/src/domains/agents/services/skillhub/TencentSkillHubService.ts:L17-L18` |
+| `OFFICE_CLAW_MCP_EXCLUDED_TOOLS` | 空（不排除） | 逗号分隔的 MCP 工具排除名单 | `relay/packages/mcp-server/src/server-toolsets.ts:L37` |
+| `JIUWENCLAW_DATA_DIR` | `<dataDir>/.jiuwenclaw` | Python 边车数据目录 | `relay/packages/api/src/domains/agents/services/agents/providers/relayclaw-sidecar.ts:L183` |
+| `OFFICE_CLAW_CONFIG_ROOT` | 进程 CWD | 配置根目录 | `relay/packages/api/src/server.ts:L29` |
+| `MEMORY_STORE` | 未设置（走 Redis） | 置 `1` 时使用内存存储 | `relay/packages/api/src/server.ts:L28` |
+
+此外，`office-claw-config.json` 的 Agent 变体由 Zod schema 校验，含 `cliConfigSchema`（`command` / `outputFormat` / `defaultArgs` / `effort`）、`contextBudgetSchema`（`maxPromptTokens` / `maxContextTokens` / `maxMessages` / `maxContentLengthPerMsg`）与 `embeddedAcpConfigSchema`（`provider` / `baseUrl` / `sslVerify` / `temperature` / `topP` / `maxTokens` 等），证据: `relay/packages/api/src/config/office-claw-config-loader.ts:L51-L95`。
+
+#### 扩展点
+
+- **扩展点 A: `OfficeClawProviderPlugin` 插件接口**
+  - 接口定义: `relay/packages/core/src/plugin/types.ts:L99-L153`（必填 `name` / `providers` / `createAgentService`；可选 `validateBinding`、`accountSpecs`、`binding`、`mcpConfigWriter/Reader/Path`、`resolveCredentialEnv`）
+  - 注入方式: ①发布名为 `@office-claw/provider-<name>` 且 `package.json` 含 `clowder.kind === 'provider'` 的包，启动时自动发现；②通过 `createOfficeClawServer({ plugins: [...] })` 以编程方式注入
+  - 证据: `relay/packages/core/src/plugin/registry.ts:L21-L37`、`relay/packages/api/src/server.ts:L32-L34`
+- **扩展点 B: `AgentService` 接口（模型接入的唯一收口）**
+  - 接口定义: `relay/packages/core/src/agent/types.ts:L233-L235`（仅一个方法 `invoke(prompt, options): AsyncIterable<AgentMessage>`）
+  - 注入方式: 在插件的 `createAgentService()` 中返回实现；核心从不直接调用模型，只调 `service.invoke()`
+- **扩展点 C: 证据 / 调度后端模块替换**
+  - 接口定义: `relay/.env.example:L191-L194`
+  - 注入方式: 把 `OFFICE_CLAW_EVIDENCE_PROVIDER_MODULES` / `OFFICE_CLAW_SCHEDULER_PROVIDER_MODULES` 指向任意符合端口契约的包路径，运行时按模块路径动态载入
+- **扩展点 D: `RuntimeEnvStore`（编程式环境存储替换）**
+  - 接口定义: `relay/packages/api/src/server.ts:L12-L18`
+  - 注入方式: `createOfficeClawServer({ runtimeEnvStore })`，替代直接读 `process.env`
+  - 证据: `relay/packages/api/src/server.ts:L30`
+- **扩展点 E: MCP 工具集注册与排除**
+  - 接口定义: `relay/packages/mcp-server/src/server-toolsets.ts:L44-L73`
+  - 注入方式: 新增 `ToolDef[]` 数组并调用 `registerTools(server, customTools)`；部署侧可用 `OFFICE_CLAW_MCP_EXCLUDED_TOOLS` 屏蔽特定工具
+- **扩展点 F: 流式与外发投递钩子**
+  - 接口定义: `relay/packages/api/src/routes/messages.ts:L52-L78`（`OutboundDeliveryHookLike` / `StreamingHookLike`）
+  - 注入方式: 注册 messages 路由时以 options 传入，外部平台连接器无需改动核心即可旁路消费流
+- **扩展点 G: `spawnCliOverride`（替换 CLI 子进程拉起方式）**
+  - 接口定义: `relay/packages/core/src/agent/types.ts:L215`
+  - 注入方式: 在 `AgentServiceOptions` 中传入自定义生成器（例如基于 tmux 的终端接管）
+
+#### 关键外部依赖
+
+服务端以 `fastify` 及其 `@fastify/{cors,cookie,multipart,static,websocket}` 插件为骨架，实时层用 `socket.io`，校验用 `zod`，配置持久化用 `conf`，凭据存储用 `cross-keychain`；MCP 侧用 `@modelcontextprotocol/sdk`；存储用 `ioredis` 与工作区包 `@openjiuwen/relay-storage-sqlite`；IM 连接器分别依赖 `@larksuiteoapi/node-sdk`（飞书）、`@wecom/aibot-node-sdk`（企业微信）、`dingtalk-stream`（钉钉）；内容处理用 `cheerio`、`fast-xml-parser`、`jszip`、`cron-parser`、`@huggingface/transformers`；前端用 `react-router-dom`、`@xyflow/react`、`@codemirror/*`、`docx-preview`、`exceljs`。值得注意的是 **API 包内没有 `@anthropic-ai/sdk` 或 `openai` SDK**——模型交互统一走 CLI 子进程或 ACP 运行时，各 Provider SDK 位于独立的 `@office-claw/provider-*` npm 包中（`relay/packages/api/package.json:L47-L85`）。工程工具链为 pnpm 9.15.4 + Biome + Changesets + dependency-cruiser（`relay/package.json:L98-L108`）。
