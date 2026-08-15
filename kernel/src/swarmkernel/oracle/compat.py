@@ -260,6 +260,80 @@ def _compare_class(old: dict[str, Any], new: dict[str, Any], loc: str) -> list[C
 _TYPE_WIDTH = {"integer": 1, "number": 2, "string": 1, "boolean": 1, "array": 1, "object": 1}
 
 
+def _compare_schema_node(old: dict[str, Any], new: dict[str, Any], where: str) -> list[Change]:
+    """Compare one schema node's own constraints (not its children).
+
+    Split out from :func:`classify_json_schema` because the *root* node needs
+    exactly the same treatment as any nested property. Checking only nested
+    properties would let a top-level schema silently change from ``string`` to
+    ``integer`` -- a change that breaks every consumer while reporting clean.
+    """
+
+    out: list[Change] = []
+    if old.get("type") != new.get("type"):
+        out.append(
+            Change(
+                "H4.SCHEMA_TYPE_CHANGED",
+                ChangeSeverity.BREAKING,
+                where,
+                f"type {old.get('type')} -> {new.get('type')}",
+            )
+        )
+    o_enum, n_enum = old.get("enum"), new.get("enum")
+    if o_enum is not None and n_enum is not None:
+        removed = set(map(str, o_enum)) - set(map(str, n_enum))
+        added = set(map(str, n_enum)) - set(map(str, o_enum))
+        if removed:
+            out.append(
+                Change(
+                    "H4.SCHEMA_ENUM_SHRUNK",
+                    ChangeSeverity.BREAKING,
+                    where,
+                    f"enum values removed: {sorted(removed)}",
+                )
+            )
+        if added:
+            out.append(
+                Change(
+                    "H4.SCHEMA_ENUM_GROWN",
+                    ChangeSeverity.ADDITIVE,
+                    where,
+                    f"enum values added: {sorted(added)}",
+                )
+            )
+    elif o_enum is None and n_enum is not None:
+        out.append(
+            Change(
+                "H4.SCHEMA_ENUM_INTRODUCED",
+                ChangeSeverity.BREAKING,
+                where,
+                "an unconstrained field became an enum",
+            )
+        )
+    for key, direction in (
+        ("maxLength", "shrink"),
+        ("maximum", "shrink"),
+        ("maxItems", "shrink"),
+        ("minimum", "grow"),
+        ("minLength", "grow"),
+        ("minItems", "grow"),
+    ):
+        ov, nv = old.get(key), new.get(key)
+        if ov is None or nv is None:
+            continue
+        tighter = nv < ov if direction == "shrink" else nv > ov
+        if tighter:
+            out.append(
+                Change(
+                    "H4.SCHEMA_CONSTRAINT_TIGHTENED",
+                    ChangeSeverity.BREAKING,
+                    where,
+                    f"{key} tightened {ov} -> {nv}",
+                )
+            )
+    return out
+
+
 def classify_json_schema(old: dict[str, Any], new: dict[str, Any], loc: str = "") -> list[Change]:
     """Data-contract compatibility. Producer-side (response) semantics.
 
@@ -267,7 +341,7 @@ def classify_json_schema(old: dict[str, Any], new: dict[str, Any], loc: str = ""
     consumer's existing, valid usage is BREAKING.
     """
 
-    out: list[Change] = []
+    out: list[Change] = _compare_schema_node(old, new, loc or "<root>")
     o_req = set(old.get("required", []) or [])
     n_req = set(new.get("required", []) or [])
     o_props = old.get("properties", {}) or {}
@@ -315,60 +389,7 @@ def classify_json_schema(old: dict[str, Any], new: dict[str, Any], loc: str = ""
     for name in sorted(o_props.keys() & n_props.keys()):
         op, np_ = o_props[name], n_props[name]
         where = f"{loc}.{name}"
-        if op.get("type") != np_.get("type"):
-            out.append(
-                Change(
-                    "H4.SCHEMA_TYPE_CHANGED",
-                    ChangeSeverity.BREAKING,
-                    where,
-                    f"type {op.get('type')} -> {np_.get('type')}",
-                )
-            )
-        o_enum, n_enum = op.get("enum"), np_.get("enum")
-        if o_enum is not None and n_enum is not None:
-            removed = set(map(str, o_enum)) - set(map(str, n_enum))
-            added = set(map(str, n_enum)) - set(map(str, o_enum))
-            if removed:
-                out.append(
-                    Change(
-                        "H4.SCHEMA_ENUM_SHRUNK",
-                        ChangeSeverity.BREAKING,
-                        where,
-                        f"enum values removed: {sorted(removed)}",
-                    )
-                )
-            if added:
-                out.append(
-                    Change(
-                        "H4.SCHEMA_ENUM_GROWN",
-                        ChangeSeverity.ADDITIVE,
-                        where,
-                        f"enum values added: {sorted(added)}",
-                    )
-                )
-        elif o_enum is None and n_enum is not None:
-            out.append(
-                Change(
-                    "H4.SCHEMA_ENUM_INTRODUCED",
-                    ChangeSeverity.BREAKING,
-                    where,
-                    "an unconstrained field became an enum",
-                )
-            )
-        for key, direction in (("maxLength", "shrink"), ("maximum", "shrink"), ("minimum", "grow"), ("minLength", "grow")):
-            ov, nv = op.get(key), np_.get(key)
-            if ov is None or nv is None:
-                continue
-            tighter = nv < ov if direction == "shrink" else nv > ov
-            if tighter:
-                out.append(
-                    Change(
-                        "H4.SCHEMA_CONSTRAINT_TIGHTENED",
-                        ChangeSeverity.BREAKING,
-                        where,
-                        f"{key} tightened {ov} -> {nv}",
-                    )
-                )
+        out.extend(_compare_schema_node(op, np_, where))
         if op.get("type") == "object" and np_.get("type") == "object":
             out.extend(classify_json_schema(op, np_, where))
     return out

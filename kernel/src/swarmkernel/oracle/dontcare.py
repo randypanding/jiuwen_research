@@ -196,20 +196,34 @@ def apply_normalizer(name: str, value: Any) -> Any:
 
 
 def _walk_apply(
-    value: Any, selector: Selector, fn: Callable[[Any], Any], path: list[str] | None = None
+    value: Any,
+    selector: Selector,
+    fn: Callable[[Any], Any],
+    path: list[str] | None = None,
+    seen: list[bool] | None = None,
 ) -> Any:
-    """Apply ``fn`` at every location inside ``value`` matched by ``selector``."""
+    """Apply ``fn`` at every location inside ``value`` matched by ``selector``.
+
+    ``seen`` is an out-parameter recording whether the selector matched *any*
+    location. Matching and changing are different questions: a region that
+    matched but happened to leave the value untouched still governs the
+    comparison, and reporting only the changes would understate which freedoms
+    a verdict relied on.
+    """
 
     path = path or []
     if selector.matches_path(path):
+        if seen is not None:
+            seen.append(True)
         return fn(value)
     if isinstance(value, dict):
         return {
-            k: _walk_apply(v, selector, fn, path + [str(k)]) for k, v in value.items()
+            k: _walk_apply(v, selector, fn, path + [str(k)], seen) for k, v in value.items()
         }
     if isinstance(value, list):
         return [
-            _walk_apply(v, selector, fn, path + [f"[{i}]"]) for i, v in enumerate(value)
+            _walk_apply(v, selector, fn, path + [f"[{i}]"], seen)
+            for i, v in enumerate(value)
         ]
     return value
 
@@ -223,6 +237,21 @@ class DontCareMask:
             normalizer = getattr(region, "normalizer", None) or self._default_normalizer(
                 region
             )
+            if normalizer not in NORMALIZERS:
+                # Fail at compile time, not at the first comparison: an unknown
+                # normaliser discovered mid-run would abort a wave halfway
+                # through instead of failing the spec that introduced it.
+                raise ValueError(
+                    f"unknown normalizer {normalizer!r} in region {region.id!r}; "
+                    f"the normaliser set is closed (available: {sorted(NORMALIZERS)})"
+                )
+            if getattr(region, "track", None) is not None and (
+                getattr(region.track, "value", "") == "undefined"
+            ):
+                # An 'undefined' region marks territory that is out of contract.
+                # It must never normalise anything, or reaching forbidden
+                # behaviour would be forgiven instead of reported.
+                continue
             for raw in getattr(region, "selectors", []) or []:
                 self._compiled.append((region.id, Selector(raw), normalizer))
 
@@ -247,12 +276,10 @@ class DontCareMask:
         for region_id, selector, normalizer in self._compiled:
             if not selector.matches_channel(channel):
                 continue
-            before = out
             fn = NORMALIZERS[normalizer]
-            out = _walk_apply(out, selector, fn)
-            if out != before:
-                touched.add(region_id)
-            elif not selector.segments:
+            seen: list[bool] = []
+            out = _walk_apply(out, selector, fn, None, seen)
+            if seen:
                 touched.add(region_id)
         return out, touched
 

@@ -159,6 +159,11 @@ class DontCareRegion(Contract):
                 "an 'undefined' region is stuck/forbidden territory; it must not "
                 "carry a normalizer (that would silently legalise reaching it)"
             )
+        if not self.selectors:
+            raise ValueError(
+                "a don't-care region with no selectors covers nothing; it would "
+                "read as a declared freedom while honouring none of it"
+            )
         return self
 
 

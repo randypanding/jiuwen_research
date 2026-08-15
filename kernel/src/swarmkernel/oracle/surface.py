@@ -226,6 +226,12 @@ def extract_surface(paths: Iterable[str | Path], root: str | Path = ".") -> dict
         except SyntaxError as exc:
             modules[module] = {"module": module, "error": f"syntax error: {exc}"}
             continue
+        except OSError as exc:
+            # A declared surface path that cannot be read is an error, not an
+            # empty surface: reporting it as "no symbols" would diff as either
+            # "everything removed" or, against another missing file, as clean.
+            modules[module] = {"module": module, "error": f"unreadable: {exc}"}
+            continue
         modules[module] = surface.to_dict()
     return {"modules": modules, "schemas": {}}
 
