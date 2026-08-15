@@ -1,0 +1,57 @@
+name: specforge
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "specforge/**"
+      - ".github/workflows/specforge.yml"
+      - "PLAN.md"
+  pull_request:
+    paths:
+      - "specforge/**"
+      - ".github/workflows/specforge.yml"
+      - "PLAN.md"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: pytest + self-gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # adapter contract tests verify WIRING_NOTES against the pinned
+          # agent-core tree (tests/test_swarm_adapter_contract.py); they
+          # skip cleanly when the submodule is absent.
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        working-directory: specforge
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint (ruff, hard gate)
+        working-directory: specforge
+        run: ruff check specforge tests
+
+      - name: Unit + contract tests
+        working-directory: specforge
+        env:
+          CI: "true"   # golden-store write protection must hold under CI
+        run: python -m pytest tests -q
+
+      - name: Self-gates (H1 compile floor on specforge itself)
+        working-directory: specforge
+        run: python -m compileall -q specforge
+
+      - name: Dogfood demo (e2e wave admission)
+        working-directory: specforge
+        run: python -m specforge.cli demo
