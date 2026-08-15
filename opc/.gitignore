@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.ruff_cache/
+world/artifacts/
+world/queues.db
+world/ledger.jsonl
+waves/
+cartographer/.index/

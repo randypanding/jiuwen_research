@@ -1,0 +1,18 @@
+scenario_id: SCN-pay-001
+oracle_type: executable
+domain: payments
+visibility: holdout
+canary: CANARY-8f2e1d-pay-001-77aa
+entrypoint: "payments:compute_fee"
+inputs:
+  amount: 123.455
+  rate: 0.1
+expected:
+  fee: 12.35
+redact:
+  - elapsed_ms
+assertions:
+  - "isinstance(result.get('fee'), float)"
+timeout_s: 20
+clause_refs:
+  - REQ-payments-001

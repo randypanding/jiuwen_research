@@ -1,0 +1,6 @@
+{
+  "contract_id": "CTR-payments-core",
+  "contract_hash": "sha256:d7fe2a867c5b0d588461a0f0c6a859d206e66d964099bab086a1fa094f23621d",
+  "spec_version": "1.0.0",
+  "builder_id": "builder-test"
+}

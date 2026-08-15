@@ -1,0 +1,17 @@
+scenario_id: SCN-pay-002
+oracle_type: metamorphic
+domain: payments
+visibility: holdout
+canary: CANARY-3b9c4e-pay-002-19df
+entrypoint: "payments:compute_fee"
+inputs:
+  r1:
+    amount: 100.0
+    rate: 0.03
+  r2:
+    amount: 200.0
+    rate: 0.03
+metamorphic_relation: "r2['fee'] >= r1['fee']"
+timeout_s: 20
+clause_refs:
+  - REQ-payments-002
