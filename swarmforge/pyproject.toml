@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarmforge"
+version = "0.1.0"
+description = "Spec-as-Source development agent swarm: contracts, gates, oracles, admission transactions, event bus (on openJiuwen)"
+requires-python = ">=3.11"
+dependencies = []  # 标准库零依赖：门禁必须能在最简环境执行
+
+[project.optional-dependencies]
+openjiuwen = ["openjiuwen"]  # 仅 bus bridge / 角色装配需要
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
