@@ -1,0 +1,88 @@
+{
+  "contract_name": "SpecDoc",
+  "contract_version": 1,
+  "spec_id": "toy-clamp",
+  "spec_version": "1.0.0",
+  "clauses": [
+    {
+      "contract_name": "SpecClause",
+      "contract_version": 1,
+      "clause_id": "REQ-TOY-001",
+      "level": "L1",
+      "r_level": "R1",
+      "title": "clamp keeps values inside the requested range",
+      "text": "For downstream callers, clamp(x, lo, hi) must never return a value outside [lo, hi] when lo <= hi.",
+      "contract_body": null,
+      "dont_care": [],
+      "witness_kind": "holdout",
+      "witness_refs": [
+        "S-CLAMP-001",
+        "S-CLAMP-002",
+        "S-CLAMP-003"
+      ],
+      "status": "active",
+      "version": 1
+    },
+    {
+      "contract_name": "SpecClause",
+      "contract_version": 1,
+      "clause_id": "REQ-TOY-002",
+      "level": "L2",
+      "r_level": "R1",
+      "title": "clamp contract surface",
+      "text": "Export a single function clamp(x, lo, hi). post: lo <= result <= hi when lo <= hi; result == x when lo <= x <= hi.",
+      "contract_body": {
+        "contract_name": "MachineContract",
+        "contract_version": 1,
+        "pre": [
+          "lo <= hi"
+        ],
+        "post": [
+          "lo <= result <= hi",
+          "lo <= x <= hi implies result == x"
+        ],
+        "invariants": [
+          "pure function, no side effects"
+        ],
+        "assume": [],
+        "guarantee": []
+      },
+      "dont_care": [
+        {
+          "contract_name": "DontCareDeclaration",
+          "contract_version": 1,
+          "dont_care_id": "dc-clamp-order",
+          "kind": "output_freedom",
+          "scope": "clamp(x, lo, hi) when lo > hi",
+          "description": "result is free when bounds are inverted; any deterministic value within implementation choice is allowed",
+          "registered_by": "spec_moderator",
+          "ts": ""
+        }
+      ],
+      "witness_kind": "mechanical",
+      "witness_refs": [
+        "H3",
+        "H4"
+      ],
+      "status": "active",
+      "version": 1
+    },
+    {
+      "contract_name": "SpecClause",
+      "contract_version": 1,
+      "clause_id": "REQ-TOY-003",
+      "level": "L3",
+      "r_level": "R0",
+      "title": "implementation notes",
+      "text": "Any pure implementation is acceptable; min/max composition or branch form both allowed.",
+      "contract_body": null,
+      "dont_care": [],
+      "witness_kind": "mechanical",
+      "witness_refs": [
+        "H2"
+      ],
+      "status": "active",
+      "version": 1
+    }
+  ]
+}
