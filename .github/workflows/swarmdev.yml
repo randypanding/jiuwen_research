@@ -1,0 +1,35 @@
+name: swarmdev-gates
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "swarmdev/**"
+      - ".github/workflows/swarmdev.yml"
+  pull_request:
+    paths:
+      - "swarmdev/**"
+      - ".github/workflows/swarmdev.yml"
+
+jobs:
+  hard-gates:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    defaults:
+      run:
+        working-directory: swarmdev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: H1 install + build check
+        run: |
+          pip install -e ".[test]"
+          python -m compileall swarmdev
+      - name: H2 unit + contract tests
+        run: python -m pytest tests/contracts tests/gates tests/oracle tests/drift tests/admission tests/metrics tests/teams -q
+      - name: H3/H5 end-to-end admission tests
+        run: python -m pytest tests/integration -q
