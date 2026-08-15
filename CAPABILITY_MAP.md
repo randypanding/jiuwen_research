@@ -286,9 +286,9 @@ Spring Boot 3.5.15、MyBatis + PageHelper、Redisson、MariaDB/PostgreSQL/OpenGa
 | `WORKFLOW_EXECUTE_TIMEOUT` | `"300"` | IR 工作流执行超时（秒） | `agent-runtime/applications/ir_execution_service/ir_execution_service/ir_execution_service_app.py:L65` |
 | `RUNTIME_USERDATA` | 无 | 通过环境变量透传给被部署 Agent 的用户数据 | `agent-runtime/service/openjiuwen_runtime/service/app/base_app.py:L35` |
 | `RUNTIME_IR_PATH` | 无 | 低代码 Agent 的 IR 文件路径 | `agent-runtime/service/openjiuwen_runtime/service/app/base_app.py:L41` |
-| `bootstrap_coordination_enabled` | `True` | A2A 服务启动的 Redis 领导者协调开关 | `agent-runtime/applications/a2a_service/config.py:L36` |
+| `bootstrap_coordination_enabled` | `True` | A2A 服务启动的 Redis 领导者协调开关 | `agent-runtime/applications/a2a_service/config.py:L35` |
 | `rate_limit_max_requests` | `1` | 单会话并发请求上限 | `agent-runtime/applications/a2a_service/config.py:L43` |
-| `versatile_adapter_url` | `None` | VersatileAdapter A2A 端点 | `agent-runtime/applications/a2a_service/config.py:L49` |
+| `versatile_adapter_url` | `None` | VersatileAdapter A2A 端点 | `agent-runtime/applications/a2a_service/config.py:L50` |
 | `versatile_adapter_timeout` | `57`（秒） | 调用 VersatileAdapter 的超时 | `agent-runtime/applications/a2a_service/config.py:L52` |
 | `max_concurrent_sub_agents` | `3` | 并发子 Agent 上限 | `agent-runtime/applications/a2a_service/config.py:L59` |
 | `sub_agent_timeout_seconds` | `1800` | 单个子 Agent 执行超时 | `agent-runtime/applications/a2a_service/config.py:L60` |
@@ -378,37 +378,37 @@ Python 内核（`os.getenv` 读取，无统一 BaseSettings）：
 
 | 配置项名 | 默认值 | 说明 | 证据 |
 | --- | --- | --- | --- |
-| `IP` | `"127.0.0.1"` | 记忆服务监听地址 | `agent-memory/jiuwen_memory/server/memory_server.py:L923` |
-| `PORT` | `"8000"` | 记忆服务端口 | `agent-memory/jiuwen_memory/server/memory_server.py:L924` |
-| `MEMORY_API_KEY` | `""`（**空即不鉴权**） | REST 接口鉴权凭据，为空字符串时完全跳过鉴权 | `agent-memory/jiuwen_memory/server/memory_server.py:L212` |
+| `IP` | `"127.0.0.1"` | 记忆服务监听地址 | `agent-memory/jiuwen_memory/server/memory_server.py:L925` |
+| `PORT` | `"8000"` | 记忆服务端口 | `agent-memory/jiuwen_memory/server/memory_server.py:L926` |
+| `MEMORY_API_KEY` | `""`（**空即不鉴权**） | REST 接口鉴权凭据，为空字符串时完全跳过鉴权 | `agent-memory/jiuwen_memory/server/memory_server.py:L188`、`L204-L208` |
 | `MEMORY_DATA_DIR` | `~/.jiuwenmemory/memory_data` | 数据根目录 | `agent-memory/jiuwen_memory/server/store_factory.py:L21-L29` |
 | `DB_URL` | 上述目录下的 `sqlite_db.db` | SQLAlchemy 异步连接串 | `agent-memory/jiuwen_memory/server/store_factory.py:L62-L70` |
 | `FILE_MEMORY_DATA_DIR` | `~/.jiuwenmemory/file_memory_data` | 文件型索引根目录 | `agent-memory/jiuwen_memory/server/store_factory.py:L32-L45` |
 | `INDEX_BACKEND` | `"simple"` | 索引后端（simple / file） | `agent-memory/jiuwen_memory/server/memory_server.py:L432` |
-| `KV_STORE_TYPE` | `"db"` | KV 后端 | `agent-memory/jiuwen_memory/server/store_factory.py:L84` |
-| `DB_STORE_TYPE` | `"default"` | DB 后端 | `agent-memory/jiuwen_memory/server/store_factory.py:L113` |
-| `VECTOR_STORE_TYPE` | `"chroma"` | 向量后端 | `agent-memory/jiuwen_memory/server/store_factory.py:L135` |
-| `VECTOR_MILVUS_URI` / `_TOKEN` / `_DATABASE` | `""` / `""` / `"default"` | Milvus 连接参数 | `agent-memory/jiuwen_memory/server/store_factory.py:L146-L148` |
-| `VECTOR_ES_HOSTS` / `_USERNAME` / `_PASSWORD` | `""` | Elasticsearch 连接参数 | `agent-memory/jiuwen_memory/server/store_factory.py:L155-L163` |
-| `VECTOR_ES_INDEX_PREFIX` | `"agent_vector"` | ES 索引前缀 | `agent-memory/jiuwen_memory/server/store_factory.py:L183` |
-| `VECTOR_GAUSS_HOST` / `_PORT` | `"localhost"` / `"5432"` | GaussDB 向量库连接 | `agent-memory/jiuwen_memory/server/store_factory.py:L190-L191` |
-| `EMBED_MODEL_NAME` / `EMBED_API_KEY` / `EMBED_API_BASE` | `""` | Embedding 服务参数 | `agent-memory/jiuwen_memory/server/memory_server.py:L451-L453` |
-| `MODEL_NAME` / `MODEL_PROVIDER` / `API_KEY` / `API_BASE` | `""` | 抽取用 LLM 参数 | `agent-memory/jiuwen_memory/server/memory_server.py:L510-L515` |
-| `TEMPERATURE` | `0.95` | 抽取 LLM 温度 | `agent-memory/jiuwen_memory/server/memory_server.py:L511` |
-| `MODEL_SSL_VERIFY` | `"false"` | 调用 LLM 时是否校验 TLS 证书（**默认不校验**） | `agent-memory/jiuwen_memory/server/memory_server.py:L517` |
+| `KV_STORE_TYPE` | `"db"` | KV 后端 | `agent-memory/jiuwen_memory/server/store_factory.py:L114` |
+| `DB_STORE_TYPE` | `"default"` | DB 后端 | `agent-memory/jiuwen_memory/server/store_factory.py:L143` |
+| `VECTOR_STORE_TYPE` | `"chroma"` | 向量后端 | `agent-memory/jiuwen_memory/server/store_factory.py:L167` |
+| `VECTOR_MILVUS_URI` / `_TOKEN` / `_DATABASE` | `""` / `""` / `"default"` | Milvus 连接参数 | `agent-memory/jiuwen_memory/server/store_factory.py:L178-L180` |
+| `VECTOR_ES_HOSTS` / `_USERNAME` / `_PASSWORD` | `""` | Elasticsearch 连接参数 | `agent-memory/jiuwen_memory/server/store_factory.py:L185-L193` |
+| `VECTOR_ES_INDEX_PREFIX` | `"agent_vector"` | ES 索引前缀 | `agent-memory/jiuwen_memory/server/store_factory.py:L220` |
+| `VECTOR_GAUSS_HOST` / `_PORT` | `"localhost"` / `"5432"` | GaussDB 向量库连接 | `agent-memory/jiuwen_memory/server/store_factory.py:L227-L228` |
+| `EMBED_MODEL_NAME` / `EMBED_API_KEY` / `EMBED_API_BASE` | `""` | Embedding 服务参数 | `agent-memory/jiuwen_memory/server/memory_server.py:L448-L450` |
+| `MODEL_NAME` / `MODEL_PROVIDER` / `API_KEY` / `API_BASE` | `""` | 抽取用 LLM 参数 | `agent-memory/jiuwen_memory/server/memory_server.py:L508-L514` |
+| `TEMPERATURE` | `0.95` | 抽取 LLM 温度 | `agent-memory/jiuwen_memory/server/memory_server.py:L509` |
+| `MODEL_SSL_VERIFY` | `"false"` | 调用 LLM 时是否校验 TLS 证书（**默认不校验**） | `agent-memory/jiuwen_memory/server/memory_server.py:L516` |
 | `MEMORY_ENABLE_MIDDLE_MEMORY` | `"false"` | 中期记忆整合开关 | `agent-memory/jiuwen_memory/server/memory_server.py:L519` |
-| `MEMORY_CODEC` | `""` | 落盘加密算法（aes / sm4 / 自定义注册名） | `agent-memory/jiuwen_memory/server/memory_server.py:L460` |
-| `AES_KEY` / `SM4_KEY` | `""` | 对应密钥（十六进制） | `agent-memory/jiuwen_memory/server/memory_server.py:L490`、`L471` |
+| `MEMORY_CODEC` | `""` | 落盘加密算法（aes / sm4 / 自定义注册名） | `agent-memory/jiuwen_memory/server/memory_server.py:L465` |
+| `AES_KEY` / `SM4_KEY` | `""` | 对应密钥（十六进制） | `agent-memory/jiuwen_memory/server/memory_server.py:L491`、`L472` |
 | `ForgettingConfig.enabled` | `False` | 遗忘功能开关 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L102` |
 | `ForgettingConfig.threshold` | `0.15` | 低于该分数的记忆被软遗忘 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L103` |
 | `ForgettingConfig.max_evict` | `1000` | 单轮最大淘汰条数（防雪崩） | `agent-memory/jiuwen_memory/memory_core/config/config.py:L104` |
 | `ForgettingConfig.min_retention_days` | `30` | 最近访问保护窗口（天） | `agent-memory/jiuwen_memory/memory_core/config/config.py:L105` |
-| `DreamingConfig.enabled` | `False` | Dreaming 开关 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L117` |
-| `DreamingConfig.interval_seconds` | `14400.0`（4 小时） | Dreaming 周期 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L118` |
-| `DreamingConfig.min_session_rounds` | `4` | 参与整合的最小会话轮数 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L119` |
-| `DreamingConfig.max_sessions_per_sweep` | `10` | 单轮最大处理会话数 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L120` |
-| `DreamingConfig.max_compress_tokens` | `30000` | 压缩 token 预算 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L121` |
-| `DreamingConfig.max_items_per_session` | `5` | 单会话最多抽取知识条数 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L122` |
+| `DreamingConfig.enabled` | `False` | Dreaming 开关 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L118` |
+| `DreamingConfig.interval_seconds` | `14400.0`（4 小时） | Dreaming 周期 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L119` |
+| `DreamingConfig.min_session_rounds` | `4` | 参与整合的最小会话轮数 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L120` |
+| `DreamingConfig.max_sessions_per_sweep` | `10` | 单轮最大处理会话数 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L121` |
+| `DreamingConfig.max_compress_tokens` | `30000` | 压缩 token 预算 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L122` |
+| `DreamingConfig.max_items_per_session` | `5` | 单会话最多抽取知识条数 | `agent-memory/jiuwen_memory/memory_core/config/config.py:L123` |
 
 Java 平台（`agent-memory/agent-memory-platform/platform/src/main/resources/application.yml`）：
 
@@ -518,7 +518,7 @@ Java 平台（`agent-memory/agent-memory-platform/platform/src/main/resources/ap
 | `HttpConfig::ip` / `port` | 无默认（必填） | A2A 服务监听地址与端口 | `agent-protocol/A2A/cpp-sdk/include/server/http_server_builder.h:L20-L25` |
 | `HttpConfig::ioThreadNum` | `1` | A2A I/O 事件循环线程数 | `agent-protocol/A2A/cpp-sdk/include/server/http_server_builder.h:L26` |
 | `HttpConfig::endpoint` | `"/jsonrpc"` | A2A JSON-RPC 路径 | `agent-protocol/A2A/cpp-sdk/include/server/http_server_builder.h:L28` |
-| `TlsConfig::enabled`（A2A） | `false` | 服务端 TLS 开关（**默认关闭**） | `agent-protocol/A2A/cpp-sdk/src/server/http_server.h:L29` |
+| `TlsConfig::enabled`（A2A） | `false` | 服务端 TLS 开关（**默认关闭**） | `agent-protocol/A2A/cpp-sdk/src/server/http_server.h:L28` |
 | `TlsConfig::verifyPeer`（A2A） | `true` | mTLS 对端校验 | `agent-protocol/A2A/cpp-sdk/src/server/http_server.h:L35` |
 | `connectTimeoutMs_` / `readTimeoutMs_` | `10000` / `60000`（毫秒） | 推送通知出站超时 | `agent-protocol/A2A/cpp-sdk/src/transport/http_server_transport.h:L77-L78` |
 | `DEFAULT_PROTOCOL_VERSION` | `"1.0"` | A2A 协议版本 | `agent-protocol/A2A/cpp-sdk/src/shared/common_types.h:L45` |
@@ -535,7 +535,7 @@ Java 平台（`agent-memory/agent-memory-platform/platform/src/main/resources/ap
 | `StreamableHttpServerConfig::stateless` | `false` | 无状态 HTTP 模式 | `agent-protocol/MCP/cpp-sdk/include/mcp/mcp_type.h:L72` |
 | `StreamableHttpServerConfig::ioThreads` | `1` | MCP HTTP I/O 线程数 | `agent-protocol/MCP/cpp-sdk/include/mcp/mcp_type.h:L73` |
 | `TlsConfig::enabled`（MCP） | `false` | MCP TLS 开关 | `agent-protocol/MCP/cpp-sdk/include/mcp/mcp_type.h:L50` |
-| `ServerConfig::workerThreads` | `1` | MCP 工作线程数 | `agent-protocol/MCP/cpp-sdk/include/mcp/mcp_type.h:L111` |
+| `ServerConfig::workerThreads` | `1` | MCP 工作线程数 | `agent-protocol/MCP/cpp-sdk/include/mcp/mcp_type.h:L110` |
 | `MCP_BUILD_CLIENT` / `MCP_WITH_HTTP` | `ON` | 构建 MCP 客户端 / HTTP 传输 | `agent-protocol/MCP/cpp-sdk/CMakeLists.txt:L14-L16` |
 | `MCP_ENABLE_STDIO` | `OFF` | 启用 stdio 传输相关构建 | `agent-protocol/MCP/cpp-sdk/CMakeLists.txt:L11` |
 | `A2X_REGISTRY_HOME` | `~/.a2x_registry/` | Registry 数据与凭据根目录 | `agent-protocol/AgentRegistry/a2x_registry/common/paths.py:L31-L40` |
@@ -745,7 +745,7 @@ infer_router 的全部运行时配置集中于一个 pydantic-settings `BaseSett
 | `CONFIG_PATH`（环境变量） | `config.yaml` | YAML 配置文件路径 | `agent-tools/packages/infer_router/src/openjiuwentools/infer_router/config/config.py:L20` |
 | `KV_TARGET`（环境变量） | 无 | 覆盖 P2P 分离式连接器的 `X-KV-Target` 头 | `agent-tools/packages/infer_router/src/openjiuwentools/infer_router/api/server.py:L65-L69` |
 | `--worker-mode` | `aggregated` | worker 模式：`aggregated`/`prefill`/`decode` | `agent-tools/packages/infer_router/src/openjiuwentools/infer_router/vllm/args.py:L40-L43` |
-| `--request-plane` | `http` | 请求平面：`http` / `tcp` | `agent-tools/packages/infer_router/src/openjiuwentools/infer_router/vllm/args.py:L31-L32` |
+| `--request-plane` | `http` | 请求平面：`http` / `tcp` | `agent-tools/packages/infer_router/src/openjiuwentools/infer_router/vllm/args.py:L30-L31` |
 | `--kv-relay-endpoint` | 见代码 | KV 事件中继的 ZMQ PUB 地址 | `agent-tools/packages/infer_router/src/openjiuwentools/infer_router/vllm/args.py:L38-L39` |
 
 #### 扩展点
@@ -830,7 +830,7 @@ infer_router：FastAPI / uvicorn / pydantic(-settings) / httpx / loguru / promet
 | `memory.engine` | `${MEMORY_ENGINE:-builtin}` | 记忆引擎：builtin / external / both / none | `jiuwenswarm/jiuwenswarm/resources/config.yaml:L108` |
 | `memory.jiuwen.mode` | `${JIUWEN_MEMORY_MODE:-server}` | 接入 agent-memory 的方式：server（HTTP）/ sdk（进程内） | `jiuwenswarm/jiuwenswarm/resources/config.yaml:L197-L199` |
 | `memory.jiuwen.server.base_url` | `${JIUWEN_MEMORY_BASE_URL:-http://127.0.0.1:8137}` | agent-memory 服务地址 | `jiuwenswarm/jiuwenswarm/resources/config.yaml:L205-L206` |
-| `models.defaults[].model_client_config` | `${API_BASE}` / `${API_KEY}` / `${MODEL_NAME}` / `${MODEL_PROVIDER}` | 主模型连接参数（全部走环境变量） | `jiuwenswarm/jiuwenswarm/resources/config.yaml:L235-L245`、`jiuwenswarm/jiuwenswarm/common/config.py:L1192-L1195` |
+| `models.defaults[].model_client_config` | `${API_BASE}` / `${API_KEY}` / `${MODEL_NAME}` / `${MODEL_PROVIDER}` | 主模型连接参数（全部走环境变量） | `jiuwenswarm/jiuwenswarm/resources/config.yaml:L235-L245`、`jiuwenswarm/jiuwenswarm/common/config.py:L1190-L1199` |
 | `models.defaults[].model_client_config.timeout` | `360` | 单次模型 HTTP 请求超时（秒） | `jiuwenswarm/jiuwenswarm/resources/config.yaml:L242-L243` |
 | `models.defaults[].model_client_config.stream_first_chunk_timeout` | `300` | 流式首包等待上限（秒） | `jiuwenswarm/jiuwenswarm/resources/config.yaml:L244-L245` |
 | `MODEL_ALIAS`（环境变量） | `""` | 模型展示别名 | `jiuwenswarm/jiuwenswarm/common/config.py:L1189` |
