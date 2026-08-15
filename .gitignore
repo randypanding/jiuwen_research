@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+instances/
+waves/journals/
+.pytest_cache/
+*.egg-info/
