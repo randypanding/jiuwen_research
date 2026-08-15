@@ -27,7 +27,20 @@ from typing import Sequence
 
 from ..contracts.gate import Finding, JudgeSample, SoftGateResult, SoftVerdict
 
-__all__ = ["cohens_kappa", "SoftGateEngine", "JudgeFitness", "aggregate", "ScreenedSample"]
+__all__ = [
+    "AGGREGATION_MODES",
+    "cohens_kappa",
+    "SoftGateEngine",
+    "JudgeFitness",
+    "aggregate",
+    "ScreenedSample",
+]
+
+#: The closed set of aggregation modes. Closed because "the config said so" is
+#: not a reason to invent a new admission rule at runtime.
+AGGREGATION_MODES: frozenset[str] = frozenset(
+    {"any_veto", "majority_veto", "unanimous_veto"}
+)
 
 
 def cohens_kappa(a: Sequence[str], b: Sequence[str]) -> float:
@@ -92,6 +105,11 @@ def aggregate(samples: Sequence[JudgeSample], mode: str) -> SoftVerdict:
     configuration: one credible, cited veto blocks.
     """
 
+    if mode not in AGGREGATION_MODES:
+        # Checked before the sample count, so a misconfigured mode is loud even
+        # on an empty sample set. A config typo must never degrade to a silent
+        # default.
+        raise ValueError(f"unknown aggregation mode {mode!r}")
     considered = [s for s in samples if s.verdict is not SoftVerdict.ABSTAIN]
     vetoes = [s for s in considered if s.verdict is SoftVerdict.VETO]
     if not considered:
@@ -108,7 +126,7 @@ def aggregate(samples: Sequence[JudgeSample], mode: str) -> SoftVerdict:
             if vetoes and len(vetoes) == len(considered)
             else SoftVerdict.NO_VETO
         )
-    raise ValueError(f"unknown aggregation mode {mode!r}")
+    raise AssertionError(f"unreachable: mode {mode!r}")  # pragma: no cover
 
 
 class SoftGateEngine:

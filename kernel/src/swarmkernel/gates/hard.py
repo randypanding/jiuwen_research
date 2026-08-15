@@ -240,18 +240,37 @@ class H4ContractSurface:
                     ),
                 )
             )
+        # The individual breaking changes are always reported, but their
+        # *severity* depends on whether they were declared. H4 exists to catch
+        # undeclared or understated breakage, not to forbid breaking changes
+        # outright: a gate that no correctly-declared change can pass is a gate
+        # teams route around.
+        blocking = bool(findings)
         for c in breaking:
             findings.append(
-                Finding(code=c.code, message=c.message, location=c.location)
+                Finding(
+                    code=c.code,
+                    message=c.message,
+                    location=c.location,
+                    severity="error" if blocking else "warning",
+                )
             )
         detail = {
             "changes": len(changes),
             "breaking": len(breaking),
             "severity": severity.value,
         }
-        if findings:
+        if blocking:
             return fail(self.gate_id, "contract surface violation", findings, **detail)
-        return ok(self.gate_id, f"surface compatible ({severity.value})", **detail)
+        return GateResult(
+            gate=self.gate_id,
+            status=GateStatus.PASS,
+            findings=findings,
+            detail={
+                "summary": f"surface compatible ({severity.value})",
+                **detail,
+            },
+        )
 
 
 class H5Differential:
