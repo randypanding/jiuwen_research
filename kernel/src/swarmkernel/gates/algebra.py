@@ -1,15 +1,15 @@
-"""Admission algebra: ``Admit = H and S``.
+"""Admission algebra: ``Admit = H ∧ S``.
 
-This module is thirty lines of logic guarding the single most important
-decision in the platform. It is written as a standalone pure function so that
-it can be proved, property-tested, and read by a human in one sitting.
+This module is a few dozen lines guarding the single most important decision in
+the platform. It is written as a standalone pure function so that it can be
+property-tested exhaustively and read by a human in one sitting.
 
-Two properties are enforced and tested exhaustively:
+Two properties are enforced and tested:
 
-* **Monotonicity of the veto.** For any hard report ``H`` and soft verdict
-  ``S``, ``admit(H, VETO) == False``. The soft gate can only ever remove.
-* **No rescue.** For any ``S``, if ``H`` is not fully passed then
-  ``admit(H, S) == False``. Nothing outside the hard gates can create
+* **Monotonicity of the veto.** For any hard report ``H``, ``admit(H, VETO)``
+  is False. The soft gate can only ever remove.
+* **No rescue.** For any soft verdict ``S``, if ``H`` is not fully passed then
+  ``admit(H, S)`` is False. Nothing outside the hard gates can create
   admissibility.
 """
 
@@ -17,8 +17,10 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from ..contracts.base import Role
 from ..contracts.gate import (
     AdmissionDecision,
+    Finding,
     GateId,
     GateResult,
     HardGateReport,
@@ -27,40 +29,36 @@ from ..contracts.gate import (
 )
 from ..contracts.spec import RLevel
 
-__all__ = ["REQUIRED_GATES_BY_RLEVEL", "build_hard_report", "admit", "decide"]
+__all__ = ["REQUIRED_GATES", "build_hard_report", "admit", "decide"]
 
 
-#: Which hard gates are mandatory at each regenerability level.
-#:
-#: H5 is meaningless for R0 (no fan-out, nothing to compare against), and R3
-#: additionally requires the golden path inside H5. Everything else is required
-#: everywhere: a gate that is optional is a gate that is off.
-REQUIRED_GATES_BY_RLEVEL: dict[RLevel, frozenset[GateId]] = {
-    RLevel.R0: frozenset({GateId.H1_BUILD, GateId.H2_UNIT_PROPERTY, GateId.H3_HOLDOUT, GateId.H4_SURFACE, GateId.H6_INVARIANT, GateId.H7_DRIFT, GateId.H8_BUDGET}),
-    RLevel.R1: frozenset({GateId.H1_BUILD, GateId.H2_UNIT_PROPERTY, GateId.H3_HOLDOUT, GateId.H4_SURFACE, GateId.H5_DIFFERENTIAL, GateId.H6_INVARIANT, GateId.H7_DRIFT, GateId.H8_BUDGET}),
-    RLevel.R2: frozenset({GateId.H1_BUILD, GateId.H2_UNIT_PROPERTY, GateId.H3_HOLDOUT, GateId.H4_SURFACE, GateId.H5_DIFFERENTIAL, GateId.H6_INVARIANT, GateId.H7_DRIFT, GateId.H8_BUDGET}),
-    RLevel.R3: frozenset({GateId.H1_BUILD, GateId.H2_UNIT_PROPERTY, GateId.H3_HOLDOUT, GateId.H4_SURFACE, GateId.H5_DIFFERENTIAL, GateId.H6_INVARIANT, GateId.H7_DRIFT, GateId.H8_BUDGET}),
-}
+#: Every hard gate is required for every unit. There is no per-level opt-out:
+#: a gate that is optional is a gate that is off. H5 stays required at R0 and
+#: reports "not applicable" from inside the gate, so the *decision* to skip is
+#: recorded as evidence instead of as an absence.
+REQUIRED_GATES: tuple[GateId, ...] = tuple(
+    sorted((g for g in GateId if g.is_hard), key=lambda g: g.value)
+)
 
 
 def build_hard_report(
-    unit_id: str,
-    instance_id: str,
-    results: Sequence[GateResult],
-    r_level: RLevel,
+    unit_id: str, instance_id: str, results: Sequence[GateResult]
 ) -> HardGateReport:
     return HardGateReport(
         unit_id=unit_id,
         instance_id=instance_id,
         results=list(results),
-        required=sorted(REQUIRED_GATES_BY_RLEVEL[r_level], key=lambda g: g.value),
+        REQUIRED_GATES=REQUIRED_GATES,
     )
 
 
 def admit(hard: HardGateReport, soft: SoftGateResult | None) -> bool:
-    """The whole decision. ``None`` soft result means the soft gate did not run,
-    which is not a veto — but it is also not a pass, because it cannot be: only
-    the hard report can produce admissibility."""
+    """The whole decision.
+
+    ``soft is None`` means the soft gate did not run. That is not a veto — and
+    it is not a pass either, because a soft gate can never produce one. Only the
+    hard report can make something admissible.
+    """
 
     if not hard.passed:
         return False
@@ -73,46 +71,70 @@ def decide(
     *,
     unit_id: str,
     instance_id: str,
-    wave_id: str,
     r_level: RLevel,
     results: Sequence[GateResult],
     soft: SoftGateResult | None,
     human_approved: bool = False,
+    decided_by: Role = Role.VERIFIER,
 ) -> AdmissionDecision:
-    hard = build_hard_report(unit_id, instance_id, results, r_level)
+    hard = build_hard_report(unit_id, instance_id, results)
+    hard_passed = hard.passed
+    soft_vetoed = soft is not None and soft.verdict is SoftVerdict.VETO
     admitted = admit(hard, soft)
 
-    reasons: list[str] = []
-    if not hard.passed:
-        missing = sorted(g.value for g in hard.missing_gates())
-        failed = sorted(r.gate_id.value for r in hard.failures())
+    reasons: list[Finding] = []
+    if not hard_passed:
+        missing = [g.value for g in hard.missing_gates]
         if missing:
-            reasons.append(f"hard gates never ran: {missing}")
-        if failed:
-            reasons.append(f"hard gates failed: {failed}")
-    if soft is not None and soft.verdict is SoftVerdict.VETO:
+            reasons.append(
+                Finding(
+                    code="ADMIT.GATE_MISSING",
+                    message=f"hard gates never ran: {missing}",
+                )
+            )
+        for r in hard.failures:
+            reasons.append(
+                Finding(
+                    code="ADMIT.GATE_FAILED",
+                    message=f"{r.gate.value} {r.status.value}: "
+                    + "; ".join(f.code for f in r.findings),
+                    clause_ids=sorted({c for f in r.findings for c in f.clause_ids}),
+                )
+            )
+    if soft_vetoed and soft is not None:
+        citations = sorted(
+            {s.citation for s in soft.samples if s.verdict is SoftVerdict.VETO and s.citation}
+        )
         reasons.append(
-            "soft gate vetoed: "
-            + "; ".join(
-                sorted({c for s in soft.vetoes() for c in s.citations}) or ["<uncited>"]
+            Finding(
+                code="ADMIT.SOFT_VETO",
+                message="soft gate vetoed: " + ("; ".join(citations) or "<uncited>"),
             )
         )
+
     if admitted and r_level.requires_human_approval and not human_approved:
-        # Not a veto and not a gate failure: a governance precondition. It is
-        # applied *after* the algebra so that the algebra stays a pure
-        # conjunction and remains provable.
+        # A governance precondition, not a gate failure. It is applied after the
+        # algebra so the algebra stays a pure conjunction and remains provable.
+        # It is modelled as a *hard* failure so the contract's own algebra
+        # validator still holds.
+        hard_passed = False
         admitted = False
         reasons.append(
-            f"{r_level.value} requires recorded human approval before admission"
+            Finding(
+                code="ADMIT.HUMAN_APPROVAL_REQUIRED",
+                message=(
+                    f"{r_level.value} requires recorded human approval before "
+                    "admission (PDR-001 §4)"
+                ),
+            )
         )
 
     return AdmissionDecision(
         unit_id=unit_id,
         instance_id=instance_id,
-        wave_id=wave_id,
-        hard_report=hard,
-        soft_result=soft,
         admitted=admitted,
+        hard_passed=hard_passed,
+        soft_vetoed=soft_vetoed,
         reasons=reasons,
-        human_approved=human_approved,
+        decided_by=decided_by,
     )

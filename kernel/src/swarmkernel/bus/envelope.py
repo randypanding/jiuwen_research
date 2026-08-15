@@ -16,7 +16,6 @@ from ..contracts.base import (
     Contract,
     Role,
     SemVer,
-    canonical_json,
     digest_of,
     utcnow,
 )
@@ -68,7 +67,7 @@ class Envelope(Contract):
 
     @model_validator(mode="after")
     def _seal(self) -> "Envelope":
-        computed = digest_of(canonical_json(self.payload))
+        computed = digest_of(self.payload)
         if not self.payload_digest:
             object.__setattr__(self, "payload_digest", computed)
         elif self.payload_digest != computed:
@@ -78,7 +77,7 @@ class Envelope(Contract):
         return self
 
     def verify(self) -> bool:
-        return self.payload_digest == digest_of(canonical_json(self.payload))
+        return self.payload_digest == digest_of(self.payload)
 
 
 def seal(

@@ -138,6 +138,7 @@ class GoldenStore:
         records: Iterable[GoldenRecord] = (),
         mode: GoldenMode = GoldenMode.COMPARE,
         authorisation: str | None = None,
+        environments: Mapping[str, R3Info] | None = None,
     ) -> None:
         if mode is GoldenMode.REGENERATE and not authorisation:
             raise GoldenStoreWriteError(
@@ -146,8 +147,10 @@ class GoldenStore:
         self._mode = mode
         self._auth = authorisation
         self._records: dict[str, GoldenRecord] = {}
+        self._environments: dict[str, R3Info] = dict(environments or {})
+        self._supersede_reasons: dict[str, str] = {}
         for r in records:
-            self._records[r.golden_id] = r
+            self._records[r.id] = r
 
     @property
     def mode(self) -> GoldenMode:
@@ -164,22 +167,23 @@ class GoldenStore:
             raise GoldenStoreWriteError(
                 "golden store is in compare mode; CI may never write goldens"
             )
-        existing = self._records.get(record.golden_id)
+        existing = self._records.get(record.id)
         if existing is not None and not existing.superseded_by:
             raise GoldenStoreWriteError(
-                f"golden {record.golden_id!r} already exists and was not superseded; "
+                f"golden {record.id!r} already exists and was not superseded; "
                 "goldens are append-only"
             )
-        self._records[record.golden_id] = record
+        self._records[record.id] = record
 
     def supersede(self, golden_id: str, new_record: GoldenRecord, reason: str) -> None:
         if self._mode is not GoldenMode.REGENERATE:
             raise GoldenStoreWriteError("cannot supersede in compare mode")
         old = self._records[golden_id]
         self._records[golden_id] = old.model_copy(
-            update={"superseded_by": new_record.golden_id, "supersede_reason": reason}
+            update={"superseded_by": new_record.id}
         )
-        self._records[new_record.golden_id] = new_record
+        self._records[new_record.id] = new_record
+        self._supersede_reasons[golden_id] = reason
 
     def compare(
         self, golden_id: str, actual: Any, actual_env: R3Info | None = None
@@ -196,18 +200,15 @@ class GoldenStore:
                 message="no golden record found; a missing baseline is a failure",
             )
         actual_digest = digest_of(actual)
-        matched = actual_digest == record.value_digest
+        matched = actual_digest == record.observation_digest
         drift: tuple[str, ...] = ()
-        if actual_env is not None and record.environment:
-            try:
-                recorded = R3Info(**record.environment)  # type: ignore[arg-type]
-                drift = tuple(recorded.diff(actual_env))
-            except TypeError:
-                drift = ("environment manifest is not an R3Info",)
+        recorded_env = self._environments.get(record.id)
+        if actual_env is not None and recorded_env is not None:
+            drift = tuple(recorded_env.diff(actual_env))
         return GoldenComparison(
             golden_id=golden_id,
             matched=matched,
-            expected_digest=record.value_digest,
+            expected_digest=record.observation_digest,
             actual_digest=actual_digest,
             environment_drift=drift,
             message="" if matched else "golden mismatch",
@@ -243,9 +244,9 @@ class GoldenSuite:
             )
         seen: set[str] = set()
         for g in self.goldens:
-            if g.golden_id in seen:
-                problems.append(f"{self.unit_id}: duplicate golden id {g.golden_id!r}")
-            seen.add(g.golden_id)
+            if g.id in seen:
+                problems.append(f"{self.unit_id}: duplicate golden id {g.id!r}")
+            seen.add(g.id)
         return problems
 
 

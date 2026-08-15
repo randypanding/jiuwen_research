@@ -25,13 +25,13 @@ from ..contracts.spec import RLevel, SpecDelta, SpecDocument
 from ..oracle.golden import GoldenStore
 from ..oracle.traceability import AnchorResolver, Exemption
 
-__all__ = ["GateContext", "Gate", "GateRegistry", "missing_evidence"]
+__all__ = ["GateContext", "Gate", "GateRegistry", "missing_evidence", "ok", "fail"]
 
 
 @dataclass
 class GateContext:
     """All evidence a gate may look at. A gate that needs something not in here
-    is a gate that has a side effect, and must be split."""
+    is a gate with a side effect, and must be split."""
 
     unit_id: str
     instance_id: str
@@ -39,7 +39,7 @@ class GateContext:
     spec: SpecDocument | None = None
     spec_delta: SpecDelta | None = None
 
-    # H1 / H2 / H8 raw tool output, supplied by the harness adapter.
+    # H1 / H2 / H8: raw tool output, supplied by the harness adapter.
     build: Mapping[str, Any] = field(default_factory=dict)
     static: Mapping[str, Any] = field(default_factory=dict)
     unit_tests: Mapping[str, Any] = field(default_factory=dict)
@@ -66,6 +66,7 @@ class GateContext:
 
     # H7
     anchor_resolver: AnchorResolver | None = None
+    drift_baseline: Mapping[str, str] = field(default_factory=dict)
     exemptions: Sequence[Exemption] = ()
     today: str = "1970-01-01"
     contract_bearing_symbols: set[str] = field(default_factory=set)
@@ -94,25 +95,44 @@ class Gate(Protocol):
     def run(self, ctx: GateContext) -> GateResult: ...
 
 
-def missing_evidence(gate_id: GateId, what: str, ctx: GateContext) -> GateResult:
+def ok(gate_id: GateId, summary: str, **detail: Any) -> GateResult:
+    return GateResult(
+        gate=gate_id,
+        status=GateStatus.PASS,
+        detail={"summary": summary, **detail},
+    )
+
+
+def fail(
+    gate_id: GateId,
+    summary: str,
+    findings: Sequence[Finding],
+    **detail: Any,
+) -> GateResult:
+    return GateResult(
+        gate=gate_id,
+        status=GateStatus.FAIL,
+        findings=list(findings),
+        detail={"summary": summary, **detail},
+    )
+
+
+def missing_evidence(gate_id: GateId, what: str) -> GateResult:
     """Uniform 'evidence absent' result. Always ERROR, never PASS."""
 
     return GateResult(
-        gate_id=gate_id,
+        gate=gate_id,
         status=GateStatus.ERROR,
-        instance_id=ctx.instance_id,
-        unit_id=ctx.unit_id,
-        summary=f"missing evidence: {what}",
         findings=[
             Finding(
                 code=f"{gate_id.value}.NO_EVIDENCE",
                 message=(
                     f"{gate_id.value} requires {what}, which was not supplied. "
-                    "Absence of evidence is never treated as evidence of absence."
+                    "Absence of evidence is never evidence of absence."
                 ),
-                blocking=True,
             )
         ],
+        detail={"summary": f"missing evidence: {what}"},
     )
 
 

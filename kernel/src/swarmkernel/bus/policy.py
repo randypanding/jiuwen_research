@@ -231,11 +231,15 @@ class AsymmetryPolicy:
                 False,
                 "self-review: a judge may not evaluate an instance it authored",
             )
+        # "Subject" is the agent the artefact is *about*, taken from the
+        # envelope's addressee -- not the subscriber that happens to receive a
+        # broadcast copy. Conflating the two would stop an author from ever
+        # seeing its own broadcast, which is noise rather than separation.
         if (
             artifact in (A.ORACLE_HOLDOUT, A.ORACLE_PUBLIC)
             and sender_role is R.VERIFIER
-            and recipient_identity is not None
-            and sender_identity == recipient_identity
+            and subject_identity is not None
+            and sender_identity == subject_identity
         ):
             return PolicyDecision(
                 False, "the author of an oracle may not also be its subject"

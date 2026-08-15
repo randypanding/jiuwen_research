@@ -61,7 +61,7 @@ class StrengthReport:
 
 
 def _asserts_something(scenario: Scenario) -> bool:
-    return bool(scenario.expectations) or bool(scenario.expected_exception)
+    return bool(scenario.expect)
 
 
 def run_mutation_probes(
@@ -79,11 +79,11 @@ def run_mutation_probes(
     out: list[MutationOutcome] = []
     for probe in probes:
         failing = tuple(sorted(runner(probe)))
-        expected = set(probe.expected_killers)
+        expected = set(probe.must_be_caught_by)
         killed = bool(failing) and (not expected or bool(expected & set(failing)))
         out.append(
             MutationOutcome(
-                probe_id=probe.probe_id,
+                probe_id=probe.id,
                 killed=killed,
                 killed_by=failing,
                 message=""
@@ -109,7 +109,7 @@ class OracleAuditor:
         mutation_outcomes: Sequence[MutationOutcome] = (),
         regression_scenarios: Mapping[str, bool] | None = None,
     ) -> StrengthReport:
-        scenarios = list(bundle.all_scenarios())
+        scenarios = list(bundle.holdout.scenarios)
         reasons: list[str] = []
 
         if not scenarios:
@@ -122,7 +122,7 @@ class OracleAuditor:
         asserting = [s for s in scenarios if _asserts_something(s)]
         assertion_rate = len(asserting) / len(scenarios)
         if assertion_rate < 1.0:
-            silent = [s.scenario_id for s in scenarios if not _asserts_something(s)]
+            silent = [s.id for s in scenarios if not _asserts_something(s)]
             reasons.append(f"scenarios that assert nothing: {sorted(silent)}")
 
         # Dual criterion (SWE-bench FAIL_TO_PASS + PASS_TO_PASS): the change must
@@ -141,8 +141,10 @@ class OracleAuditor:
         bound: set[str] = set()
         for s in scenarios:
             bound.update(s.clause_ids)
-        for p in bundle.properties:
-            bound.update(p.clause_ids)
+        for prop in bundle.public.properties:
+            bound.update(prop.clause_ids)
+        for mr in bundle.public.metamorphic:
+            bound.update(mr.clause_ids)
         clause_coverage = (len(wanted & bound) / len(wanted)) if wanted else 1.0
         if wanted and clause_coverage < self.min_clause_coverage:
             reasons.append(f"clauses with no oracle: {sorted(wanted - bound)}")

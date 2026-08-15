@@ -35,7 +35,8 @@ from .traceability import (
     DriftKind,
     Exemption,
     TraceabilityEngine,
-    build_anchor,
+    BLOCKING_KINDS,
+    build_baseline,
 )
 
 __all__ = [
@@ -72,5 +73,6 @@ __all__ = [
     "DriftKind",
     "Exemption",
     "TraceabilityEngine",
-    "build_anchor",
+    "BLOCKING_KINDS",
+    "build_baseline",
 ]
