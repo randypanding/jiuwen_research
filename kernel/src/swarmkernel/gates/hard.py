@@ -15,7 +15,7 @@ from ..contracts.instance import DivergenceVerdict
 from ..contracts.spec import RLevel, WitnessKind
 from ..oracle.compat import classify
 from ..oracle.traceability import TraceabilityEngine
-from .base import GateContext, GateRegistry, fail, missing_evidence, ok
+from .base import GateContext, GateRegistry, fail, missing_evidence, not_applicable, ok
 
 __all__ = [
     "H1Build",
@@ -40,6 +40,7 @@ class H1Build:
     """
 
     #: Relative cost (D17 fail-fast ordering): 1
+    relative_cost = 1
     gate_id = GateId.H1_BUILD
     name = "build/type/static"
 
@@ -86,6 +87,7 @@ class H2UnitProperty:
     """
 
     #: Relative cost (D17 fail-fast ordering): 2
+    relative_cost = 2
     gate_id = GateId.H2_UNIT_PROPERTY
     name = "unit+property"
 
@@ -155,6 +157,7 @@ class H3Holdout:
     """
 
     #: Relative cost (D17 fail-fast ordering): 4
+    relative_cost = 4
     gate_id = GateId.H3_HOLDOUT
     name = "holdout scenarios"
 
@@ -210,6 +213,7 @@ class H4ContractSurface:
     """Contract surface + breaking-change detection + version-bump enforcement."""
 
     #: Relative cost (D17 fail-fast ordering): 1
+    relative_cost = 1
     gate_id = GateId.H4_SURFACE
     name = "contract surface"
 
@@ -278,9 +282,27 @@ class H4ContractSurface:
 
 
 class H5Differential:
-    """Cross-instance differential + golden comparison."""
+    """Cross-instance differential + golden comparison.
+
+    Two structurally different jobs, kept strictly apart:
+
+    * **R3 (frozen)** — the job is the golden comparison. It runs FIRST and
+      INDEPENDENT of any differential logic: R3 never fans out (§5), so a
+      differential verdict for R3 is structurally ``n/a`` and must never be
+      able to short-circuit the frozen-output check. (Regression fixed here:
+      the single-instance carve-out used to return before the golden block,
+      making the golden check dead code on the only legal R3 path.)
+    * **R0-R2** — the job is the differential verdict. Only CLOSED admits.
+
+    The single-instance ``n/a`` carve-out is dual-path by design: a declared
+    N=1 wave that submits *no* differential report is recorded as n/a (there
+    is nothing to compare); a wave that submits one anyway is judged by it —
+    and a 1-sample report necessarily reads INSUFFICIENT (D9). Both arms are
+    fail-closed; the asymmetry is deliberate.
+    """
 
     #: Relative cost (D17 fail-fast ordering): 5
+    relative_cost = 5
     gate_id = GateId.H5_DIFFERENTIAL
     name = "differential/golden"
 
@@ -296,23 +318,81 @@ class H5Differential:
     )
 
     def run(self, ctx: GateContext) -> GateResult:
+        if ctx.fanout_plan is not None and ctx.fanout_plan.signal.r_level is not ctx.r_level:
+            # The wave manifest and the unit registry disagree about the R
+            # level. The gate cannot trust either, so it refuses to run —
+            # an ERROR, not a FAIL: nothing about the artefact was measured.
+            return GateResult(
+                gate=self.gate_id,
+                status=GateStatus.ERROR,
+                findings=[
+                    Finding(
+                        code="H5.FANOUT_LEVEL_MISMATCH",
+                        message=(
+                            f"fan-out plan declares {ctx.fanout_plan.signal.r_level.value} "
+                            f"but the unit is {ctx.r_level.value}; the evidence set "
+                            "is contradictory"
+                        ),
+                    )
+                ],
+                detail={"summary": "fan-out plan contradicts the declared R level"},
+            )
+        if ctx.r_level is RLevel.R3:
+            return self._run_golden(ctx)
+        return self._run_differential(ctx)
+
+    # ------------------------------------------------------------------ R3
+
+    def _run_golden(self, ctx: GateContext) -> GateResult:
+        """R3: frozen-output comparison. The differential part is n/a by
+        construction (R3 forbids fan-out), so any supplied differential
+        report is not consulted on this path."""
+
+        if ctx.golden_store is None:
+            return missing_evidence(self.gate_id, "golden store (R3)")
+        if not ctx.golden_comparisons:
+            return missing_evidence(self.gate_id, "golden comparisons (R3)")
+        findings: list[Finding] = []
+        for comp in ctx.golden_comparisons:
+            if not comp.matched:
+                findings.append(
+                    Finding(
+                        code="H5.GOLDEN_MISMATCH",
+                        message=(
+                            f"golden {comp.golden_id} mismatch"
+                            + (
+                                f"; environment drift: {list(comp.environment_drift)}"
+                                if comp.environment_drift
+                                else ""
+                            )
+                        ),
+                        location=comp.golden_id,
+                    )
+                )
+        if findings:
+            return fail(self.gate_id, "golden mismatch (R3)", findings, verdict="golden")
+        return ok(self.gate_id, "golden outputs matched (R3)", verdict="golden")
+
+    # --------------------------------------------------------------- R0-R2
+
+    def _run_differential(self, ctx: GateContext) -> GateResult:
         report = ctx.differential_report
         if report is None:
             if ctx.r_level is RLevel.R0:
-                return ok(
+                return not_applicable(
                     self.gate_id,
                     "R0: no fan-out, differential not applicable",
                     verdict="n/a",
                 )
-            if ctx.fanout_n is not None and ctx.fanout_n < 2:
+            if ctx.fanout_plan is not None and ctx.fanout_plan.n < 2:
                 # A declared N=1 wave has nothing to compare: with one sample
                 # there is no differential measurement to demand (D9/D18
                 # composition). The decision to run single-instance is recorded
                 # as evidence — like the R0 carve-out above — not as an absence.
-                # Undeclared contexts stay fail-closed (fanout_n=None).
-                return ok(
+                # Undeclared contexts stay fail-closed (fanout_plan=None).
+                return not_applicable(
                     self.gate_id,
-                    f"N={ctx.fanout_n}: single-instance wave, differential not applicable",
+                    f"N={ctx.fanout_plan.n}: single-instance wave, differential not applicable",
                     verdict="n/a",
                 )
             return missing_evidence(self.gate_id, "differential report")
@@ -341,28 +421,6 @@ class H5Differential:
                     ),
                 )
             )
-
-        if ctx.r_level is RLevel.R3:
-            if ctx.golden_store is None:
-                return missing_evidence(self.gate_id, "golden store (R3)")
-            if not ctx.golden_comparisons:
-                return missing_evidence(self.gate_id, "golden comparisons (R3)")
-            for comp in ctx.golden_comparisons:
-                if not comp.matched:
-                    findings.append(
-                        Finding(
-                            code="H5.GOLDEN_MISMATCH",
-                            message=(
-                                f"golden {comp.golden_id} mismatch"
-                                + (
-                                    f"; environment drift: {list(comp.environment_drift)}"
-                                    if comp.environment_drift
-                                    else ""
-                                )
-                            ),
-                            location=comp.golden_id,
-                        )
-                    )
         detail = {
             "verdict": verdict.value,
             "classes": len(report.classes),
@@ -380,6 +438,7 @@ class H6Invariant:
     """Spec invariants + runtime guardrails."""
 
     #: Relative cost (D17 fail-fast ordering): 2
+    relative_cost = 2
     gate_id = GateId.H6_INVARIANT
     name = "invariants/guardrails"
 
@@ -430,6 +489,7 @@ class H7Drift:
     """Spec<->code drift, plus the unverifiable-clause census."""
 
     #: Relative cost (D17 fail-fast ordering): 2
+    relative_cost = 2
     gate_id = GateId.H7_DRIFT
     name = "spec/code drift"
 
@@ -521,6 +581,7 @@ class H8Budget:
     """Cost, resource and performance budget."""
 
     #: Relative cost (D17 fail-fast ordering): 1
+    relative_cost = 1
     gate_id = GateId.H8_BUDGET
     name = "budget"
 

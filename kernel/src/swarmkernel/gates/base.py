@@ -23,6 +23,7 @@ from ..contracts.gate import Finding, GateId, GateResult, GateStatus
 from ..contracts.governance import MigrationStage
 from ..contracts.oracle import HoldoutOracle, PublicOracle
 from ..contracts.spec import RLevel, SpecDelta, SpecDocument
+from ..contracts.wave import FanoutPlan
 from ..oracle.golden import GoldenStore
 from ..oracle.traceability import AnchorResolver, Exemption
 
@@ -31,6 +32,7 @@ __all__ = [
     "Gate",
     "GateRegistry",
     "missing_evidence",
+    "not_applicable",
     "ok",
     "fail",
 ]
@@ -46,10 +48,13 @@ class GateContext:
     r_level: RLevel = RLevel.R1
     spec: SpecDocument | None = None
     spec_delta: SpecDelta | None = None
-    #: The wave's fan-out plan N for this unit, when declared. None means
-    #: undeclared — H5 then stays fail-closed about missing differential
-    #: evidence (D9/D18 composition).
-    fanout_n: int | None = None
+    #: The wave's fan-out plan for this unit, when declared. Deliberately the
+    #: FanoutPlan contract — not a bare int — so the single-instance n/a
+    #: carve-out in H5 can only be licensed by a plan that FanoutPlan.decide()
+    #: could actually have produced (its signal carries the R level, which the
+    #: gate cross-checks against ctx.r_level). None means undeclared; H5 then
+    #: stays fail-closed about missing differential evidence (D9/D18).
+    fanout_plan: FanoutPlan | None = None
 
     # H1 / H2 / H8: raw tool output, supplied by the harness adapter.
     build: Mapping[str, Any] = field(default_factory=dict)
@@ -149,6 +154,23 @@ def missing_evidence(gate_id: GateId, what: str) -> GateResult:
             )
         ],
         detail={"summary": f"missing evidence: {what}"},
+    )
+
+
+def not_applicable(gate_id: GateId, summary: str, **detail: Any) -> GateResult:
+    """Uniform 'declared not applicable' result.
+
+    NOT_APPLICABLE admits (like PASS) but is a different status on purpose:
+    the report must distinguish "measured and fine" from "declared out of
+    scope for this unit" — an n/a recorded as a pass quietly erases the
+    decision to skip. The declaration comes from the R level / wave plan,
+    never from the instance.
+    """
+
+    return GateResult(
+        gate=gate_id,
+        status=GateStatus.NOT_APPLICABLE,
+        detail={"summary": summary, **detail},
     )
 
 

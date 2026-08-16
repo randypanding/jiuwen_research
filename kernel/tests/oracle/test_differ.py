@@ -144,6 +144,58 @@ def test_a_registered_freedom_downgrades_a_divergence(dont_care_order):
     assert divs == []
 
 
+# ------------------------------------------------ D8: reliance bookkeeping
+
+
+def test_a_verdict_records_the_freedom_it_relied_upon(dont_care_order):
+    """D8: when normalisation erases a difference, the report must still name
+    the freedom that licensed the erasure — a CLOSED verdict that silently
+    depended on a don't-care region understates the spec's true freedoms."""
+
+    engine = DifferentialEngine([dont_care_order])
+    reports = [
+        make_report("a", breakdown=["x", "y"]),
+        make_report("b", breakdown=["y", "x"]),
+        make_report("c", breakdown=["x", "y"]),
+    ]
+    report = engine.run(make_input(reports, dont_care=[dont_care_order]), "DR-D8")
+    assert report.verdict is DivergenceVerdict.CLOSED
+    assert report.dont_care_touched == ["DC-LINE-ORDER"]
+
+
+def test_matched_but_unchanged_regions_are_still_recorded(dont_care_order):
+    """The load-bearing half of D8: a region whose selector matches but whose
+    normaliser happens to leave the value untouched (already-sorted lists) is
+    recorded exactly like one that rewrote the value. Reporting only
+    value-changing regions would understate which freedoms a verdict rests on."""
+
+    engine = DifferentialEngine([dont_care_order])
+    touched: set[str] = set()
+    engine.diff_pair(
+        make_report("a", breakdown=["x", "y"]),
+        make_report("b", breakdown=["x", "y"]),
+        EquivalenceLevel.IO,
+        touched=touched,
+    )
+    assert touched == {"DC-LINE-ORDER"}
+
+
+def test_no_registered_freedom_means_an_empty_record():
+    """No regions registered -> nothing relied upon -> the record is empty,
+    not absent: the field always answers the question "what did this verdict
+    depend on?"."""
+
+    engine = DifferentialEngine([])
+    reports = [
+        make_report("a", total="10.00", breakdown=["x"]),
+        make_report("b", total="10.00", breakdown=["x"]),
+        make_report("c", total="10.00", breakdown=["x"]),
+    ]
+    report = engine.run(make_input(reports), "DR-D8-2")
+    assert report.verdict is DivergenceVerdict.CLOSED
+    assert report.dont_care_touched == []
+
+
 def test_an_unregistered_difference_stays_a_defect():
     engine = DifferentialEngine([])
     divs = engine.diff_pair(

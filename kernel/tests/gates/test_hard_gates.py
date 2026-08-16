@@ -15,6 +15,7 @@ from swarmkernel.contracts.base import ChangeSeverity, digest_of
 from swarmkernel.contracts.gate import GateId, GateStatus
 from swarmkernel.contracts.instance import DivergenceVerdict
 from swarmkernel.contracts.spec import RLevel, SpecDelta, SpecDeltaItem, WitnessKind
+from swarmkernel.contracts.wave import FanoutPlan, UncertaintySignal
 from swarmkernel.gates.base import GateContext, GateRegistry
 from swarmkernel.gates.hard import (
     ALL_HARD_GATES,
@@ -32,6 +33,7 @@ from swarmkernel.gates.hard import (
 from swarmkernel.oracle.differ import DifferentialEngine, DifferentialInput
 from swarmkernel.oracle.golden import GoldenComparison, GoldenStore
 from swarmkernel.oracle.surface import extract_module_surface
+from swarmkernel.oracle.traceability import AnchorResolver
 
 from ..conftest import make_report
 
@@ -311,44 +313,71 @@ def test_h5_passes_on_closed(ctx):
 
 
 def test_h5_is_not_applicable_at_r0(ctx):
-    """R0 has no fan-out, so the gate reports "n/a" rather than being skipped:
-    a skipped gate leaves a hole in the report, an n/a one does not."""
+    """R0 has no fan-out, so the gate reports NOT_APPLICABLE rather than being
+    skipped: a skipped gate leaves a hole in the report, an n/a one does not."""
 
     result = H5Differential().run(
         replace(ctx, r_level=RLevel.R0, differential_report=None)
     )
-    assert result.status is GateStatus.PASS
+    assert result.status is GateStatus.NOT_APPLICABLE
     assert result.detail["verdict"] == "n/a"
 
 
 def test_h5_errors_at_r1_without_a_differential_report(ctx):
-    """fanout_n undeclared: the context is silent about the wave plan, so the
-    gate stays fail-closed (D3) and demands the evidence."""
+    """fanout_plan undeclared: the context is silent about the wave plan, so
+    the gate stays fail-closed (D3) and demands the evidence."""
 
     result = H5Differential().run(replace(ctx, differential_report=None))
     assert result.status is GateStatus.ERROR
 
 
+def _fanout_plan(ctx: GateContext, n: int) -> FanoutPlan:
+    """A plan that FanoutPlan.decide() could have produced for this unit."""
+
+    return FanoutPlan(
+        unit_id=ctx.unit_id,
+        n=n,
+        signal=UncertaintySignal(r_level=ctx.r_level),
+    )
+
+
 def test_h5_is_not_applicable_for_a_declared_single_instance_wave(ctx):
     """D9/D18 composition: a declared N=1 wave has nothing to compare, so H5
-    records "n/a" as evidence — same philosophy as the R0 carve-out. The
-    declaration (fanout_n) is what licenses this, not the runtime's mood."""
+    records NOT_APPLICABLE — same philosophy as the R0 carve-out. Only a
+    FanoutPlan whose signal matches the unit's R level licenses this."""
 
     result = H5Differential().run(
-        replace(ctx, differential_report=None, fanout_n=1)
+        replace(ctx, differential_report=None, fanout_plan=_fanout_plan(ctx, 1))
     )
-    assert result.status is GateStatus.PASS
+    assert result.status is GateStatus.NOT_APPLICABLE
     assert result.detail["verdict"] == "n/a"
 
 
 def test_h5_demands_evidence_for_a_declared_multi_instance_wave(ctx):
-    """fanout_n >= 2 declared but no report supplied: a block, because a
+    """N >= 2 declared but no report supplied: a block, because a
     multi-instance wave owes the differential measurement."""
 
     result = H5Differential().run(
-        replace(ctx, differential_report=None, fanout_n=3)
+        replace(ctx, differential_report=None, fanout_plan=_fanout_plan(ctx, 3))
     )
     assert result.status is GateStatus.ERROR
+
+
+def test_h5_refuses_a_plan_that_contradicts_the_r_level(ctx):
+    """The n/a carve-out must not be forgable: a plan whose signal declares a
+    different R level than the unit registry is an evidence contradiction and
+    the gate refuses to run."""
+
+    plan = FanoutPlan(
+        unit_id=ctx.unit_id,
+        n=1,
+        signal=UncertaintySignal(r_level=RLevel.R0),
+    )
+    result = H5Differential().run(
+        replace(ctx, differential_report=None, fanout_plan=plan)
+    )
+    assert result.status is GateStatus.ERROR
+    assert "H5.FANOUT_LEVEL_MISMATCH" in {f.code for f in result.findings}
 
 
 def test_h5_requires_goldens_at_r3(ctx):
@@ -393,6 +422,88 @@ def test_h5_reports_environment_drift_alongside_the_mismatch(ctx):
     )
     assert result.status is GateStatus.FAIL
     assert any("environment drift" in f.message for f in result.findings)
+
+
+def _r3_single_instance(ctx: GateContext) -> GateContext:
+    """R3's only legal wave: FanoutPlan.decide() forces n=1, no differential
+    report (R3 forbids fan-out, so there is nothing to diff)."""
+
+    return replace(
+        ctx,
+        r_level=RLevel.R3,
+        differential_report=None,
+        fanout_plan=FanoutPlan(
+            unit_id=ctx.unit_id, n=1, signal=UncertaintySignal(r_level=RLevel.R3)
+        ),
+    )
+
+
+def test_h5_r3_single_instance_without_goldens_errors(ctx):
+    """Regression (severe): the N=1 carve-out used to return before the golden
+    block, so the only legal R3 path skipped the frozen-output check entirely.
+    R3 + its legal n=1 plan + no golden evidence must ERROR, never PASS."""
+
+    result = H5Differential().run(_r3_single_instance(ctx))
+    assert result.status is GateStatus.ERROR
+    assert "H5.NO_EVIDENCE" in {f.code for f in result.findings}
+
+
+def test_h5_r3_single_instance_with_a_mismatched_golden_fails(ctx):
+    comparison = GoldenComparison(
+        golden_id="G1",
+        matched=False,
+        expected_digest=digest_of("a"),
+        actual_digest=digest_of("b"),
+    )
+    result = H5Differential().run(
+        replace(
+            _r3_single_instance(ctx),
+            golden_store=GoldenStore([]),
+            golden_comparisons=[comparison],
+        )
+    )
+    assert result.status is GateStatus.FAIL
+    assert "H5.GOLDEN_MISMATCH" in {f.code for f in result.findings}
+
+
+def test_h5_r3_single_instance_with_matching_goldens_passes(ctx):
+    comparison = GoldenComparison(
+        golden_id="G1",
+        matched=True,
+        expected_digest=digest_of("a"),
+        actual_digest=digest_of("a"),
+    )
+    result = H5Differential().run(
+        replace(
+            _r3_single_instance(ctx),
+            golden_store=GoldenStore([]),
+            golden_comparisons=[comparison],
+        )
+    )
+    assert result.status is GateStatus.PASS
+    assert result.detail["verdict"] == "golden"
+
+
+def test_h5_r3_ignores_a_supplied_differential_report(ctx):
+    """R3's differential verdict is structurally n/a (fan-out is forbidden):
+    a stray differential report must not be able to reach the verdict logic,
+    neither to pass nor to block. The golden evidence decides."""
+
+    comparison = GoldenComparison(
+        golden_id="G1",
+        matched=True,
+        expected_digest=digest_of("a"),
+        actual_digest=digest_of("a"),
+    )
+    result = H5Differential().run(
+        replace(
+            _r3_single_instance(ctx),
+            differential_report=ctx.differential_report,
+            golden_store=GoldenStore([]),
+            golden_comparisons=[comparison],
+        )
+    )
+    assert result.status is GateStatus.PASS
 
 
 # ------------------------------------------------------------------- H6
@@ -525,3 +636,79 @@ def test_a_declared_witness_with_no_gate_behind_it_is_detectable(ctx):
     kinds = witness_kinds_satisfied(replace(ctx, unit_tests={}, property_tests={}))
     assert WitnessKind.UNIT not in kinds
     assert WitnessKind.PROPERTY not in kinds
+
+
+# ---------------------------------------------------------------- meta
+#
+# Oracle anti-vacuity (PDR-001 §8, MutationProbe): a gate that cannot go red
+# is indistinguishable from a gate that is not running. Each case below
+# injects exactly one defect into the all-green reference context and asserts
+# the gate *whose job it is* turns red — the same one-defect-at-a-time
+# discipline as the tests above, lifted into a closed mutation table.
+
+
+@pytest.mark.meta
+@pytest.mark.parametrize(
+    "gate_cls,mutate",
+    [
+        (H1Build, lambda ctx: replace(ctx, build={"compiled": False, "error": "boom"})),
+        (
+            H2UnitProperty,
+            lambda ctx: replace(
+                ctx,
+                unit_tests={"total": 12, "failed": 3, "errors": 0, "assertion_rate": 1.0},
+            ),
+        ),
+        (
+            H3Holdout,
+            lambda ctx: replace(
+                ctx,
+                holdout_results={
+                    s.id: False for s in ctx.holdout_oracle.scenarios
+                },
+            ),
+        ),
+        (
+            H4ContractSurface,
+            lambda ctx: replace(
+                ctx, new_surface=surface("def total(lines, tax):\n    return 0\n")
+            ),
+        ),
+        (
+            H5Differential,
+            lambda ctx: replace(
+                ctx,
+                differential_report=ctx.differential_report.model_copy(
+                    update={"verdict": DivergenceVerdict.AMBIGUITY}
+                ),
+            ),
+        ),
+        (H6Invariant, lambda ctx: replace(ctx, invariant_results={"L2-CART.CURRENCY-002": False})),
+        (
+            H7Drift,
+            lambda ctx: replace(
+                ctx,
+                anchor_resolver=AnchorResolver(
+                    sources={"cart/total.py": "def total(lines, discount): ...\n"},
+                    symbols={
+                        "cart/total.py::total": "def total(lines, discount) -> Decimal"
+                    },
+                ),
+            ),
+        ),
+        (H8Budget, lambda ctx: replace(ctx, budget={"usd": 5.0, "wall_time_s": 45})),
+    ],
+    ids=lambda v: getattr(v, "__name__", "mutate"),
+)
+def test_each_gate_catches_its_own_mutation(ctx, gate_cls, mutate):
+    """The reference context is green for every gate; the single mutation
+    turns exactly the responsible gate red (FAIL or ERROR — both block)."""
+
+    assert gate_cls().run(ctx).status is GateStatus.PASS, gate_cls.__name__
+    broken = mutate(ctx)
+    result = gate_cls().run(broken)
+    assert result.status in (GateStatus.FAIL, GateStatus.ERROR), (
+        gate_cls.__name__,
+        result.findings,
+    )
+    assert result.findings, f"{gate_cls.__name__} went red without a finding"

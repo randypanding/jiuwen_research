@@ -14,11 +14,34 @@ The package is deliberately layered, and so are its dependencies:
 | Contracts (data layer) | `swarmkernel.contracts` | `pydantic` (construction-time invariants), `PyYAML` (spec Markdown frontmatter only) |
 | Oracle engines | `swarmkernel.oracle` | **none** (pure stdlib) |
 | Gates + admission algebra | `swarmkernel.gates` | **none** (pure stdlib) |
-| Bus | `swarmkernel.bus` | **none** (pure stdlib) |
+| Bus | `swarmkernel.bus` | `pydantic`, via the `Contract` base class the envelopes carry |
 
 The judgment core — oracle engines, gates, the admission algebra — imports no
 third-party library directly. Everything a CI run decides is decidable from
-the standard library alone; pydantic only guards contract construction.
+the standard library alone; pydantic only guards contract construction (and,
+through the shared `Contract` base, the bus envelopes that carry contracts).
+
+## Kernel vs harness responsibilities
+
+The kernel ships **pure functions and contracts only**. It never schedules,
+never calls a model, never owns a process. Consumed by the harness layer:
+
+- gate execution order — `GateRegistry.run_for_stage(ctx, stage)` provides the
+  D17 policy (M0/M1 run-and-record, M2+ fail-fast by ascending cost); *when*
+  and *with which stage* to call it is the harness's decision;
+- fan-out orchestration — `FanoutPlan.decide()` is the closed decision
+  function for N; dispatching the N builds and collecting their reports is
+  harness work;
+- the full wave pipeline — `WaveStatus`/`wave_transition` define and guard the
+  six-state lifecycle; driving a wave through it is harness work.
+
+## Naming aliases (D28)
+
+The cross-plan consensus vocabulary for judge verdicts is PASS/VETO/ABSTAIN.
+This kernel spells the affirmative `NO_VETO` — `SoftVerdict` deliberately has
+no `PASS` member, so "the soft gate can admit something" is unrepresentable.
+Integration mapping: consensus PASS ≡ `NO_VETO`, VETO ≡ `VETO`,
+ABSTAIN ≡ `ABSTAIN`.
 
 ## Workspace layout (D26)
 
@@ -41,15 +64,20 @@ harness/   adapters that drive builds, probes and model calls; owns
 `swarmkernel decision.json` validates one `AdmissionDecision` and exits:
 
 - `0` ADMITTED
-- `1` REJECTED — a definite failure was measured
-- `2` INCONCLUSIVE — the instruments could not decide (retry or escalate)
+- `1` REJECTED — a definite failure was measured; also the exit for a record
+  that fails contract validation (a forged decision needs a human)
+- `2` INCONCLUSIVE — the instruments could not decide (retry or escalate);
+  also the exit for input that never produced a decision
 
 ## Development
 
-Python `>=3.11,<3.14` (CI pins 3.12). Tests:
+Python `>=3.11,<3.14`; CI (`.github/workflows/kernel-ci.yml`) runs the matrix
+3.11 / 3.12 / 3.13. Tests:
 
 ```bash
 python -m pytest tests
 ```
 
-Every test breaks exactly one thing and asserts exactly one gate fires.
+Every test breaks exactly one thing and asserts exactly one gate fires. The
+`meta`-marked tests are the oracle anti-vacuity proof: each hard gate must go
+red on a mutation of exactly the defect class it claims to catch.

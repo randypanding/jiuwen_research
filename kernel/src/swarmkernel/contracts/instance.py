@@ -94,7 +94,14 @@ class InstanceReport(Contract):
 
     @model_validator(mode="after")
     def _no_holdout_leakage(self) -> "InstanceReport":
-        """Structural tripwire: builders must not echo holdout identifiers."""
+        """Structural tripwire: builders must not echo holdout identifiers.
+
+        Best-effort by design: it scans ``notes`` only — probe payloads and
+        manifests can still carry echoes. The primary defence is structural
+        and lives elsewhere: the bus routing policy never delivers
+        ORACLE_HOLDOUT artefacts to a builder in the first place
+        (bus/policy.py §7.1). This validator is the cheap second line.
+        """
 
         forbidden = ("holdout", "rubric", "scenario:")
         blob = (self.notes or "").lower()
@@ -181,6 +188,13 @@ class DifferentialReport(Contract):
         description="NEZHA-style delta-diversity of the probe set: fraction of "
         "distinct observation tuples per probe. Used to schedule probe budget "
         "towards difference-revealing inputs rather than raw coverage.",
+    )
+    dont_care_touched: list[str] = Field(
+        default_factory=list,
+        description="Every don't-care region this verdict relied upon — "
+        "including regions that matched but happened to leave the value "
+        "unchanged (D8: reporting only value-changing regions understates "
+        "which freedoms a CLOSED verdict depends on).",
     )
     tier_escalated: bool = False
 

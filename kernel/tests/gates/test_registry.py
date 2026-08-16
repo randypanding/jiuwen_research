@@ -108,3 +108,40 @@ def test_stage_policy(ctx, stage, expect_all):
     registry(blocker, expensive).run_for_stage(ctx, stage)
     assert blocker.ran
     assert expensive.ran is expect_all
+
+
+# ------------------------------------------------ real-gate cost discipline
+
+
+def test_every_real_gate_declares_relative_cost():
+    """Regression: the real gates once carried only a ``#:`` comment where the
+    attribute belonged, so every cost silently defaulted to 3 and fail-fast
+    ordering degenerated to gate-id alphabetical — while FakeGate-based tests
+    (which hand-set the attribute) masked the defect entirely. Every gate in
+    the default registry must declare a real int."""
+
+    from swarmkernel.gates.hard import default_registry
+
+    reg = default_registry()
+    for gate in reg.ids():
+        g = reg.get(gate)
+        assert hasattr(g, "relative_cost"), (
+            f"{type(g).__name__} declares no relative_cost; D17 fail-fast "
+            "ordering would silently degrade"
+        )
+        assert isinstance(g.relative_cost, int) and g.relative_cost >= 1
+
+
+def test_real_gate_cost_order_is_not_alphabetical():
+    """The point of the costs: H5 (differential, 5) and H3 (holdout, 4) run
+    after the cheap static checks, not before them by id accident."""
+
+    from swarmkernel.gates.hard import default_registry
+
+    reg = default_registry()
+    costed = sorted(
+        ((reg.get(g).relative_cost, g.value) for g in reg.ids())
+    )
+    cheapest = [v for c, v in costed if c == costed[0][0]]
+    assert "H1" in cheapest[0]
+    assert costed[-1][1] == "H5"  # the differential is the most expensive

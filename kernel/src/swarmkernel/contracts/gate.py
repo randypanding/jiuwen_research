@@ -90,7 +90,14 @@ class GateResult(Contract):
 
 
 class SoftVerdict(str, Enum):
-    """Note the absence of a PASS member. This is intentional and load-bearing."""
+    """Note the absence of a PASS member. This is intentional and load-bearing.
+
+    Cross-plan naming (D28): the consensus vocabulary is PASS/VETO/ABSTAIN;
+    this implementation spells the affirmative ``NO_VETO`` instead of ``PASS``
+    to make "the soft gate cannot admit" un-sayable in the type itself. The
+    mapping for cross-plan integration is: consensus PASS ≡ ``NO_VETO``,
+    VETO ≡ ``VETO``, ABSTAIN ≡ ``ABSTAIN``.
+    """
 
     VETO = "veto"
     NO_VETO = "no_veto"
@@ -172,12 +179,21 @@ class HardGateReport(Contract):
         return next((r for r in self.results if r.gate is gate), None)
 
     @property
+    def _required(self) -> set[GateId]:
+        """The required set this report is judged against. The stored
+        ``REQUIRED_GATES`` tuple is authoritative when present (it pins the
+        rule that produced the report); the closed hard-gate set is the
+        fallback so a bare report is never judged against nothing."""
+
+        required = {g for g in self.REQUIRED_GATES if g.is_hard}
+        return required or {g for g in GateId if g.is_hard}
+
+    @property
     def passed(self) -> bool:
         """Missing gate == not passed. Silence is never consent."""
 
-        required = {g for g in GateId if g.is_hard}
         seen = {r.gate for r in self.results}
-        if required - seen:
+        if self._required - seen:
             return False
         return all(r.status.admits for r in self.results)
 
@@ -188,7 +204,7 @@ class HardGateReport(Contract):
     @property
     def missing_gates(self) -> list[GateId]:
         seen = {r.gate for r in self.results}
-        return sorted({g for g in GateId if g.is_hard} - seen, key=lambda g: g.value)
+        return sorted(self._required - seen, key=lambda g: g.value)
 
 
 class AdmissionOutcome(str, Enum):
@@ -239,13 +255,17 @@ class AdmissionDecision(Contract):
         """CI contract: 0 admitted, 1 rejected, 2 inconclusive."""
         return (self.outcome or self._derive_outcome()).exit_code
 
-    #: Finding codes that mean "the instrument could not decide", not "it
-    #: decided against". Kept closed: adding one is a rule change.
+    #: Finding codes that mean "the instrument could not decide / the process
+    #: is unfinished", not "a defect was measured". Kept closed: adding one is
+    #: a rule change. ``ADMIT.HUMAN_APPROVAL_REQUIRED`` belongs here because a
+    #: pending signature is an unfinished process (retry after approval), not
+    #: a defect CI should page someone to fix.
     INCONCLUSIVE_CODES: ClassVar[frozenset[str]] = frozenset(
         {
             "H3.INCONCLUSIVE",
             "H5.INSUFFICIENT",
             "ADMIT.SOFT_GATE_MISSING",
+            "ADMIT.HUMAN_APPROVAL_REQUIRED",
         }
     )
 

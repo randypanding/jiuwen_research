@@ -27,6 +27,7 @@ from ..contracts.gate import (
     SoftGateResult,
     SoftVerdict,
 )
+from ..contracts.oracle import JudgeProtocol
 from ..contracts.spec import RLevel
 
 __all__ = ["REQUIRED_GATES", "build_hard_report", "admit", "decide"]
@@ -75,18 +76,23 @@ def decide(
     results: Sequence[GateResult],
     soft: SoftGateResult | None,
     human_approved: bool = False,
-    soft_required: bool = False,
+    judge_protocol: JudgeProtocol | None = None,
     decided_by: Role = Role.VERIFIER,
 ) -> AdmissionDecision:
     """Admission transaction, governance included.
 
-    ``soft_required`` mirrors ``JudgeProtocol.required_for_admission`` (the D6
-    declaration): when the protocol declares the soft gate mandatory and it did
-    not run, the decision blocks with ``ADMIT.SOFT_GATE_MISSING``. When the
-    declaration is absent (default) a missing soft gate neither blocks nor
+    ``judge_protocol`` is the holdout oracle's protocol itself — the D6
+    declaration is read straight from ``required_for_admission``, not mirrored
+    through a boolean, so a harness cannot forget to forward it. When the
+    protocol declares the soft gate mandatory and it did not run, the decision
+    blocks with ``ADMIT.SOFT_GATE_MISSING``. When no protocol is supplied (or
+    it declares the soft gate optional) a missing soft gate neither blocks nor
     rescues — only the hard report can make something admissible.
     """
 
+    soft_required = (
+        judge_protocol is not None and judge_protocol.required_for_admission
+    )
     hard = build_hard_report(unit_id, instance_id, results)
     hard_passed = hard.passed
     soft_vetoed = soft is not None and soft.verdict is SoftVerdict.VETO
@@ -133,17 +139,19 @@ def decide(
                 ),
             )
         )
-        # Same bookkeeping as the human-approval precondition below: the pure
-        # algebra (H ∧ S) stays intact, the declared requirement is modelled as
-        # a hard failure so the contract's algebra validator still holds.
+        # Bookkeeping, not a measurement: the pure algebra (H ∧ S) stays intact
+        # and the declared requirement is recorded as hard_passed=False purely
+        # so the contract's algebra validator holds. The operational outcome
+        # correctly reads INCONCLUSIVE — no hard gate measured a defect.
         hard_passed = False
         admitted = False
 
     if admitted and r_level.requires_human_approval and not human_approved:
         # A governance precondition, not a gate failure. It is applied after the
         # algebra so the algebra stays a pure conjunction and remains provable.
-        # It is modelled as a *hard* failure so the contract's own algebra
-        # validator still holds.
+        # hard_passed=False is bookkeeping so the contract's algebra validator
+        # holds; the outcome maps to INCONCLUSIVE (a pending signature is an
+        # unfinished process, not a measured defect).
         hard_passed = False
         admitted = False
         reasons.append(

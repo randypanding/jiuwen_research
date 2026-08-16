@@ -180,35 +180,54 @@ class DifferentialEngine:
     def _channels(self, level: str) -> tuple[ObservationChannel, ...]:
         return EquivalenceLevel.CHANNELS[level]
 
-    def _normalised(self, probe: ProbeResult, level: str) -> dict[str, object]:
-        """Normalise one probe result into a comparable mapping."""
+    def _normalised(
+        self,
+        probe: ProbeResult,
+        level: str,
+        touched: set[str] | None = None,
+    ) -> dict[str, object]:
+        """Normalise one probe result into a comparable mapping.
+
+        ``touched`` is an optional out-parameter collecting every don't-care
+        region that matched during normalisation (D8) — including regions that
+        matched but left the value unchanged.
+        """
 
         out: dict[str, object] = {}
         for channel in self._channels(level):
             obs = probe.observation(channel)
             if obs is None:
                 continue
-            normalised, _ = self.mask.apply(channel.value, obs.value)
+            normalised, regions = self.mask.apply(channel.value, obs.value)
+            if touched is not None:
+                touched.update(regions)
             out[channel.value] = normalised
         return out
 
-    def _fingerprint(self, report: InstanceReport, level: str) -> str:
+    def _fingerprint(
+        self,
+        report: InstanceReport,
+        level: str,
+        touched: set[str] | None = None,
+    ) -> str:
         from ..contracts.base import digest_of
 
         rows = []
         for probe in sorted(report.probe_results, key=lambda p: p.probe_id):
-            rows.append((probe.probe_id, self._normalised(probe, level)))
+            rows.append((probe.probe_id, self._normalised(probe, level, touched)))
         return digest_of(rows)
 
     # ------------------------------------------------------------------- API
 
-    def cluster(self, data: DifferentialInput) -> list[EquivalenceClass]:
+    def cluster(
+        self, data: DifferentialInput, touched: set[str] | None = None
+    ) -> list[EquivalenceClass]:
         """Group instances by behavioural fingerprint (LDB-style)."""
 
         by_id = {r.manifest.instance_id: r for r in data.reports}
         buckets: dict[str, list[str]] = {}
         for report in data.reports:
-            fp = self._fingerprint(report, data.level)
+            fp = self._fingerprint(report, data.level, touched)
             buckets.setdefault(fp, []).append(report.manifest.instance_id)
         return [
             EquivalenceClass(
@@ -228,11 +247,14 @@ class DifferentialEngine:
         rel_tol: float = 1e-9,
         abs_tol: float = 0.0,
         strict_float_equality: bool = False,
+        touched: set[str] | None = None,
     ) -> list[Divergence]:
         """Compare two instances probe by probe, channel by channel.
 
         Numeric values compare with the declared tolerance by default (D19);
         pass ``strict_float_equality=True`` to opt back into exact equality.
+        ``touched`` optionally collects the don't-care regions relied upon
+        (D8), matched-but-unchanged regions included.
         """
 
         out: list[Divergence] = []
@@ -247,8 +269,11 @@ class DifferentialEngine:
                     continue
                 lv = lo.value if lo else None
                 rv = ro.value if ro else None
-                nlv, _ = self.mask.apply(channel.value, lv)
-                nrv, _ = self.mask.apply(channel.value, rv)
+                nlv, t1 = self.mask.apply(channel.value, lv)
+                nrv, t2 = self.mask.apply(channel.value, rv)
+                if touched is not None:
+                    touched.update(t1)
+                    touched.update(t2)
                 if self._equal(nlv, nrv, rel_tol, abs_tol, strict_float_equality):
                     continue
                 # Raw values differ *and* survived normalisation. Ask whether any
@@ -325,7 +350,8 @@ class DifferentialEngine:
         )
 
     def run(self, data: DifferentialInput, report_id: str) -> DifferentialReport:
-        classes = self.cluster(data)
+        touched: set[str] = set()
+        classes = self.cluster(data, touched)
         by_id = {r.manifest.instance_id: r for r in data.reports}
 
         divergences: list[Divergence] = []
@@ -341,6 +367,7 @@ class DifferentialEngine:
                     rel_tol=data.float_rel_tol,
                     abs_tol=data.float_abs_tol,
                     strict_float_equality=data.strict_float_equality,
+                    touched=touched,
                 )
             )
 
@@ -352,6 +379,7 @@ class DifferentialEngine:
             spec_version=data.spec_version,
             instance_ids=sorted(by_id),
             passing_instance_ids=sorted(data.passing_instance_ids),
+            dont_care_touched=sorted(touched),
             classes=classes,
             divergences=divergences,
             verdict=self.verdict(data, classes, divergences),

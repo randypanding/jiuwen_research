@@ -298,7 +298,10 @@ def test_decide_is_deterministic_given_the_same_evidence():
 def test_a_declared_required_soft_gate_that_did_not_run_blocks():
     """D6: the *declaration* decides. When the judge protocol declares the soft
     gate required for admission, its absence is a block with its own reason —
-    not a silent pass."""
+    not a silent pass. The protocol itself is passed to decide(), so a harness
+    cannot forget to forward the declaration."""
+
+    from swarmkernel.contracts.oracle import JudgeProtocol
 
     d = decide(
         unit_id="U",
@@ -306,7 +309,7 @@ def test_a_declared_required_soft_gate_that_did_not_run_blocks():
         r_level=RLevel.R1,
         results=all_pass(),
         soft=None,
-        soft_required=True,
+        judge_protocol=JudgeProtocol(required_for_admission=True),
     )
     assert not d.admitted
     assert "ADMIT.SOFT_GATE_MISSING" in {f.code for f in d.reasons}
@@ -322,9 +325,20 @@ def test_an_undeclared_missing_soft_gate_still_admits():
         r_level=RLevel.R1,
         results=all_pass(),
         soft=None,
-        soft_required=False,
     )
     assert d.admitted
+
+    from swarmkernel.contracts.oracle import JudgeProtocol
+
+    optional = decide(
+        unit_id="U",
+        instance_id="i",
+        r_level=RLevel.R1,
+        results=all_pass(),
+        soft=None,
+        judge_protocol=JudgeProtocol(required_for_admission=False),
+    )
+    assert optional.admitted
 
 
 def test_a_present_soft_gate_satisfies_the_requirement():
@@ -332,13 +346,15 @@ def test_a_present_soft_gate_satisfies_the_requirement():
     abstaining judge that ran still counts as having run (D5: abstain is
     recorded, never silently blocking)."""
 
+    from swarmkernel.contracts.oracle import JudgeProtocol
+
     d = decide(
         unit_id="U",
         instance_id="i",
         r_level=RLevel.R1,
         results=all_pass(),
         soft=soft(SoftVerdict.ABSTAIN),
-        soft_required=True,
+        judge_protocol=JudgeProtocol(required_for_admission=True),
     )
     assert d.admitted
 
@@ -352,6 +368,7 @@ def test_outcomes_and_exit_codes_are_three_valued():
     *inconclusive* (instrument could not decide, retry or escalate)."""
 
     from swarmkernel.contracts.gate import AdmissionOutcome
+    from swarmkernel.contracts.oracle import JudgeProtocol
 
     admitted = decide(
         unit_id="U",
@@ -382,10 +399,29 @@ def test_outcomes_and_exit_codes_are_three_valued():
         r_level=RLevel.R1,
         results=all_pass(),
         soft=None,
-        soft_required=True,
+        judge_protocol=JudgeProtocol(required_for_admission=True),
     )
     assert inconclusive.outcome is AdmissionOutcome.INCONCLUSIVE
     assert inconclusive.exit_code == 2
+
+
+def test_a_pending_human_signature_is_inconclusive_not_rejected():
+    """R2/R3 awaiting approval: an unfinished process, not a measured defect.
+    CI must re-run after the signature lands, not page someone to "fix" it."""
+
+    from swarmkernel.contracts.gate import AdmissionOutcome
+
+    d = decide(
+        unit_id="U",
+        instance_id="i",
+        r_level=RLevel.R2,
+        results=all_pass(),
+        soft=soft(SoftVerdict.NO_VETO),
+        human_approved=False,
+    )
+    assert not d.admitted
+    assert d.outcome is AdmissionOutcome.INCONCLUSIVE
+    assert d.exit_code == 2
 
 
 def test_the_outcome_cannot_be_forged():

@@ -14,6 +14,9 @@ import pytest
 from swarmkernel.contracts import CONTRACT_REGISTRY
 from swarmkernel.contracts.base import ArtifactClass, SemVer
 
+# Registered in pyproject [tool.pytest.ini_options] markers.
+pytestmark = pytest.mark.contract
+
 ALL_NAMES = sorted(CONTRACT_REGISTRY)
 
 

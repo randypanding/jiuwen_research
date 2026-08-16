@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
-
 from swarmkernel.cli import main
 from swarmkernel.contracts.gate import GateId, GateStatus
+from swarmkernel.contracts.oracle import JudgeProtocol
 from swarmkernel.contracts.spec import RLevel
 from swarmkernel.gates.algebra import decide
 
@@ -43,14 +42,31 @@ def test_rejected_exits_one(tmp_path):
 
 def test_inconclusive_exits_two(tmp_path):
     path = tmp_path / "d.json"
-    path.write_text(decision_payload(soft_required=True), encoding="utf-8")
+    path.write_text(
+        decision_payload(
+            judge_protocol=JudgeProtocol(required_for_admission=True)
+        ),
+        encoding="utf-8",
+    )
     assert main([str(path)]) == 2
 
 
-def test_unreadable_input_is_inconclusive_not_rejected(tmp_path):
-    """A forged decision is not a rejection: nothing was measured. CI re-queues
-    instead of paging a human to fix a ghost defect."""
+def test_a_forged_decision_exits_one(tmp_path):
+    """A record that fails contract validation needs a human, not a retry:
+    exit 1, so CI pages instead of re-queueing a fabricated document."""
 
     path = tmp_path / "d.json"
     path.write_text('{"admitted": "yes, trust me"}', encoding="utf-8")
+    assert main([str(path)]) == 1
+
+
+def test_malformed_json_exits_two(tmp_path):
+    """No decision ever existed: inconclusive (re-run), not rejected."""
+
+    path = tmp_path / "d.json"
+    path.write_text("not json at all", encoding="utf-8")
     assert main([str(path)]) == 2
+
+
+def test_missing_file_exits_two(tmp_path):
+    assert main([str(tmp_path / "nope.json")]) == 2
