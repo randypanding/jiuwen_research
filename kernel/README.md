@@ -5,6 +5,9 @@ deterministic oracle engines and the information-asymmetry bus. No LLM calls,
 no framework imports — everything here is deterministic, offline-runnable and
 unit-testable.
 
+End-to-end usage — installation, local agent integration, testing strategy
+and the human operator's workflow — is documented in [USAGE.md](USAGE.md).
+
 ## Layering and dependency policy (D21)
 
 The package is deliberately layered, and so are its dependencies:
