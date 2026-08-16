@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarmkernel"
+version = "0.1.0"
+description = "Spec-as-Source Agent Swarm kernel: contracts, hard gates (H1-H8), oracle engines and the information-asymmetry bus."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+# D21 layering: both dependencies serve the *contracts* layer only
+# (pydantic = construction-time invariants; PyYAML = spec Markdown
+# frontmatter). gates/ and oracle/ import no third-party library.
+dependencies = [
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "jsonschema>=4.0",
+]
+
+[project.scripts]
+swarmkernel = "swarmkernel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["swarmkernel*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "meta: meta-tests that prove a gate actually rejects the defect it claims to catch",
+    "contract: contract round-trip / inter-contract communication tests",
+]

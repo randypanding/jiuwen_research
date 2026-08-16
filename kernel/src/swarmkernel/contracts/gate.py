@@ -1,0 +1,312 @@
+"""Gate & admission contracts — PDR-001 §8, the gate algebra.
+
+``Admit(instance) = H(instance) ∧ S(instance)``
+
+The central design constraint: **a soft gate must not be able to admit
+anything, ever.** Rather than documenting that, the types make it unsayable —
+:class:`SoftVerdict` has no ``PASS`` member. Its only values are ``VETO``,
+``NO_VETO`` and ``ABSTAIN``, and :func:`swarmkernel.gates.algebra.admit`
+computes the conjunction from a hard report that has no access to soft results.
+There is no code path through which a soft result can raise a hard failure.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+from typing import ClassVar
+from typing import Any
+
+from pydantic import Field, model_validator
+
+from .base import ArtifactClass, Contract, Role, utcnow
+
+
+class GateStatus(str, Enum):
+    """Hard gate outcome. ``ERROR`` is a failure, never a skip."""
+
+    PASS = "pass"
+    FAIL = "fail"
+    ERROR = "error"
+    """The gate could not run. Treated as FAIL: an unrunnable gate is not a gate."""
+    NOT_APPLICABLE = "not_applicable"
+    """Declared inapplicable by the R-level registry, not by the instance."""
+
+    @property
+    def admits(self) -> bool:
+        return self in (GateStatus.PASS, GateStatus.NOT_APPLICABLE)
+
+
+class GateId(str, Enum):
+    H1_BUILD = "H1"
+    H2_UNIT_PROPERTY = "H2"
+    H3_HOLDOUT = "H3"
+    H4_SURFACE = "H4"
+    H5_DIFFERENTIAL = "H5"
+    H6_INVARIANT = "H6"
+    H7_DRIFT = "H7"
+    H8_BUDGET = "H8"
+    S_JUDGE = "S"
+
+    @property
+    def is_hard(self) -> bool:
+        return self is not GateId.S_JUDGE
+
+
+class Finding(Contract):
+    """One concrete, citable reason. Every failure must produce at least one."""
+
+    ARTIFACT_CLASS = ArtifactClass.GATE_REPORT
+
+    code: str = Field(description="Stable machine code, e.g. 'H4.SYMBOL_REMOVED'.")
+    message: str
+    clause_ids: list[str] = Field(default_factory=list)
+    location: str | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    severity: str = Field(default="error", description="error | warning | info")
+
+
+class GateResult(Contract):
+    """Result of one hard gate on one instance."""
+
+    ARTIFACT_CLASS = ArtifactClass.GATE_REPORT
+
+    gate: GateId
+    status: GateStatus
+    findings: list[Finding] = Field(default_factory=list)
+    duration_ms: float = 0.0
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _failure_must_be_explained(self) -> "GateResult":
+        if self.status in (GateStatus.FAIL, GateStatus.ERROR) and not self.findings:
+            raise ValueError(
+                f"{self.gate.value} failed without a finding; an unexplained gate "
+                "failure cannot be acted on and cannot enter an evidence receipt"
+            )
+        if not self.gate.is_hard:
+            raise ValueError("GateResult carries hard gates only; use SoftGateResult")
+        return self
+
+
+class SoftVerdict(str, Enum):
+    """Note the absence of a PASS member. This is intentional and load-bearing.
+
+    Cross-plan naming (D28): the consensus vocabulary is PASS/VETO/ABSTAIN;
+    this implementation spells the affirmative ``NO_VETO`` instead of ``PASS``
+    to make "the soft gate cannot admit" un-sayable in the type itself. The
+    mapping for cross-plan integration is: consensus PASS ≡ ``NO_VETO``,
+    VETO ≡ ``VETO``, ABSTAIN ≡ ``ABSTAIN``.
+    """
+
+    VETO = "veto"
+    NO_VETO = "no_veto"
+    ABSTAIN = "abstain"
+
+    @property
+    def vetoes(self) -> bool:
+        return self is SoftVerdict.VETO
+
+
+class JudgeSample(Contract):
+    """One independent judge sample. Multiple samples are aggregated."""
+
+    ARTIFACT_CLASS = ArtifactClass.JUDGE_VERDICT
+
+    criterion_id: str
+    verdict: SoftVerdict
+    citation: str | None = None
+    rationale: str = ""
+    presentation_order: int = 0
+    """Recorded so position-bias control can be audited after the fact."""
+
+    @model_validator(mode="after")
+    def _veto_needs_citation(self) -> "JudgeSample":
+        if self.verdict is SoftVerdict.VETO and not self.citation:
+            raise ValueError(
+                "a veto without a citation is discarded (PDR-001 §8: judges must "
+                "cite evidence)"
+            )
+        return self
+
+
+class SoftGateResult(Contract):
+    """Aggregated soft gate outcome. Can only ever remove an instance."""
+
+    ARTIFACT_CLASS = ArtifactClass.JUDGE_VERDICT
+    CONTRACT_VERSION = "1.0.0"
+
+    gate: GateId = GateId.S_JUDGE
+    verdict: SoftVerdict = SoftVerdict.NO_VETO
+    samples: list[JudgeSample] = Field(default_factory=list)
+    judge_model_tier: int = 1
+    builder_model_tier: int = 1
+    calibration_agreement: float | None = None
+    abstention_rate: float = 0.0
+    findings: list[Finding] = Field(default_factory=list)
+    disabled_reason: str | None = Field(
+        default=None,
+        description="When calibration falls below threshold the soft gate is "
+        "*disabled* (§13 downgrade 2) — which weakens nothing, because it can "
+        "only veto.",
+    )
+
+    @model_validator(mode="after")
+    def _judge_not_weaker_than_builder(self) -> "SoftGateResult":
+        if self.judge_model_tier < self.builder_model_tier:
+            raise ValueError(
+                f"judge tier {self.judge_model_tier} < builder tier "
+                f"{self.builder_model_tier}; constitution §14 forbids the "
+                "discriminator being weaker than the generator"
+            )
+        return self
+
+
+class HardGateReport(Contract):
+    """The conjunction of all hard gates for one instance."""
+
+    ARTIFACT_CLASS = ArtifactClass.GATE_REPORT
+    CONTRACT_VERSION = "1.0.0"
+
+    instance_id: str
+    unit_id: str
+    results: list[GateResult] = Field(default_factory=list)
+    produced_at: datetime = Field(default_factory=utcnow)
+
+    REQUIRED_GATES: tuple[GateId, ...] = ()
+
+    def result(self, gate: GateId) -> GateResult | None:
+        return next((r for r in self.results if r.gate is gate), None)
+
+    @property
+    def _required(self) -> set[GateId]:
+        """The required set this report is judged against. The stored
+        ``REQUIRED_GATES`` tuple is authoritative when present (it pins the
+        rule that produced the report); the closed hard-gate set is the
+        fallback so a bare report is never judged against nothing."""
+
+        required = {g for g in self.REQUIRED_GATES if g.is_hard}
+        return required or {g for g in GateId if g.is_hard}
+
+    @property
+    def passed(self) -> bool:
+        """Missing gate == not passed. Silence is never consent."""
+
+        seen = {r.gate for r in self.results}
+        if self._required - seen:
+            return False
+        return all(r.status.admits for r in self.results)
+
+    @property
+    def failures(self) -> list[GateResult]:
+        return [r for r in self.results if not r.status.admits]
+
+    @property
+    def missing_gates(self) -> list[GateId]:
+        seen = {r.gate for r in self.results}
+        return sorted(self._required - seen, key=lambda g: g.value)
+
+
+class AdmissionOutcome(str, Enum):
+    """Operational three-state outcome (D7 consensus).
+
+    The *algebra* stays two-valued (admits / not-admits) and fail-closed; this
+    enum distinguishes, for operators and CI, *why* something did not admit:
+
+    * ``ADMITTED`` — the algebra passed. Exit code 0.
+    * ``REJECTED`` — a definite failure was observed. Exit code 1.
+    * ``INCONCLUSIVE`` — the instruments could not produce a verdict (sample
+      too small, judge could not decide, evidence never arrived). Retry or
+      escalate, do not fix. Exit code 2.
+    """
+
+    ADMITTED = "admitted"
+    REJECTED = "rejected"
+    INCONCLUSIVE = "inconclusive"
+
+    @property
+    def exit_code(self) -> int:
+        return {self.ADMITTED: 0, self.REJECTED: 1, self.INCONCLUSIVE: 2}[self]
+
+
+class AdmissionDecision(Contract):
+    """The atomic admission transaction outcome (PDR-001 §9)."""
+
+    ARTIFACT_CLASS = ArtifactClass.GATE_REPORT
+    CONTRACT_VERSION = "1.0.0"
+
+    instance_id: str
+    unit_id: str
+    admitted: bool
+    hard_passed: bool
+    soft_vetoed: bool
+    outcome: AdmissionOutcome | None = Field(
+        default=None,
+        description="Operational three-state outcome. Derived by "
+        "swarmkernel.gates.algebra.decide; cross-checked on construction so a "
+        "forged record cannot mislabel a rejection as inconclusive.",
+    )
+    reasons: list[Finding] = Field(default_factory=list)
+    decided_at: datetime = Field(default_factory=utcnow)
+    decided_by: Role = Role.VERIFIER
+
+    @property
+    def exit_code(self) -> int:
+        """CI contract: 0 admitted, 1 rejected, 2 inconclusive."""
+        return (self.outcome or self._derive_outcome()).exit_code
+
+    #: Finding codes that mean "the instrument could not decide / the process
+    #: is unfinished", not "a defect was measured". Kept closed: adding one is
+    #: a rule change. ``ADMIT.HUMAN_APPROVAL_REQUIRED`` belongs here because a
+    #: pending signature is an unfinished process (retry after approval), not
+    #: a defect CI should page someone to fix.
+    INCONCLUSIVE_CODES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "H3.INCONCLUSIVE",
+            "H5.INSUFFICIENT",
+            "ADMIT.SOFT_GATE_MISSING",
+            "ADMIT.HUMAN_APPROVAL_REQUIRED",
+        }
+    )
+
+    def _derive_outcome(self) -> AdmissionOutcome:
+        if self.admitted:
+            return AdmissionOutcome.ADMITTED
+        codes = {f.code for f in self.reasons}
+        allowed = self.INCONCLUSIVE_CODES | {
+            c for c in codes if c.endswith(".NO_EVIDENCE")
+        }
+        if codes and codes <= allowed:
+            # Every reason says "could not measure", none says "measured and
+            # it failed": the honest operational answer is inconclusive.
+            return AdmissionOutcome.INCONCLUSIVE
+        return AdmissionOutcome.REJECTED
+
+    @model_validator(mode="after")
+    def _algebra_holds(self) -> "AdmissionDecision":
+        """Structural restatement of ``Admit = H ∧ S``.
+
+        Constructing an ``AdmissionDecision`` that violates the algebra raises.
+        This means an out-of-band actor cannot forge an admission record even if
+        it bypasses :func:`swarmkernel.gates.algebra.admit`.
+        """
+
+        expected = self.hard_passed and not self.soft_vetoed
+        if self.admitted != expected:
+            raise ValueError(
+                f"admission algebra violated: hard_passed={self.hard_passed}, "
+                f"soft_vetoed={self.soft_vetoed} implies admitted={expected}, "
+                f"got {self.admitted}"
+            )
+        if not self.admitted and not self.reasons:
+            raise ValueError("a rejection must carry at least one reason")
+        derived = self._derive_outcome()
+        if self.outcome is None:
+            # Backfill so persisted records always carry the operational state.
+            self.outcome = derived
+        elif self.outcome != derived:
+            raise ValueError(
+                f"outcome mismatch: reasons imply {derived.value}, "
+                f"record claims {self.outcome.value}"
+            )
+        return self
