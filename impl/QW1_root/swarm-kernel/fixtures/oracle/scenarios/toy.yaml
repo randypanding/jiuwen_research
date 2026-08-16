@@ -1,0 +1,25 @@
+scenarios:
+  - scenario_id: S-CLAMP-001
+    title: value inside range unchanged
+    inputs: {x: 5, lo: 0, hi: 10}
+    expectation: {equals: 5}
+    grading: FAIL_TO_PASS
+    tags: [core]
+  - scenario_id: S-CLAMP-002
+    title: below range clamps to lo
+    inputs: {x: -3, lo: 0, hi: 10}
+    expectation: {equals: 0}
+    grading: FAIL_TO_PASS
+    tags: [boundary]
+  - scenario_id: S-CLAMP-003
+    title: above range clamps to hi
+    inputs: {x: 17, lo: 0, hi: 10}
+    expectation: {equals: 10}
+    grading: FAIL_TO_PASS
+    tags: [boundary]
+  - scenario_id: S-CLAMP-004
+    title: boundary value hi preserved
+    inputs: {x: 10, lo: 0, hi: 10}
+    expectation: {equals: 10}
+    grading: PASS_TO_PASS
+    tags: [regression]

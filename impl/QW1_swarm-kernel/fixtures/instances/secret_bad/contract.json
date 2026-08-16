@@ -1,0 +1,9 @@
+{
+  "exports": [
+    "clamp"
+  ],
+  "signatures": {
+    "clamp": "(x, lo, hi)"
+  },
+  "dependencies": []
+}

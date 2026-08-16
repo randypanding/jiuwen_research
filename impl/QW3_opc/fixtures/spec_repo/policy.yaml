@@ -1,0 +1,8 @@
+constitution:
+  dependency_denylist:
+    - forbidden-pkg
+  dangerous_calls_deny: []
+budget:
+  max_prompt_tokens: 500000
+  max_completion_tokens: 200000
+  max_p95_latency_ms: 800

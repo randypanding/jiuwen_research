@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarmfoundry"
+version = "0.1.0"
+description = "Physics layer of the openJiuwen OPC dev-swarm: spec repo, R-registry, gate algebra (H1-H8 + S), oracle & differential engine, evidence receipts, contract communication."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+swarmfoundry = "swarmfoundry.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

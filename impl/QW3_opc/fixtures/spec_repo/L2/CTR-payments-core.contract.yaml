@@ -1,0 +1,45 @@
+contract_id: CTR-payments-core
+version: 1.0.0
+r_level: R1
+domain: payments
+l1_refs:
+  - PAY-INTENT-001
+  - PAY-INTENT-002
+interface_surface:
+  - symbol: compute_fee
+    kind: function
+    signature: "compute_fee(amount: float, rate: float) -> dict"
+    postconditions:
+      - "fee == round_half_even(amount * rate, 2)"
+clauses:
+  - id: REQ-payments-001
+    layer: L2
+    text: "fee is amount*rate rounded to 2 decimals with half-even rounding"
+    witnesses:
+      - clause_id: REQ-payments-001
+        gate: H2
+        target: test_fee_rounding
+      - clause_id: REQ-payments-001
+        gate: H3
+        target: SCN-pay-001
+  - id: REQ-payments-002
+    layer: L2
+    text: "fee is monotone non-decreasing in amount for a fixed rate"
+    witnesses:
+      - clause_id: REQ-payments-002
+        gate: H3
+        target: SCN-pay-002
+  - id: REQ-payments-003
+    layer: L2
+    text: "receipt notes should read naturally in Chinese"
+    advisory: true
+    witnesses:
+      - clause_id: REQ-payments-003
+        gate: S
+        target: rubric-readability
+dont_care:
+  - id: DC-1
+    scope: elapsed_ms
+    kind: unspecified
+    note: "wall-clock measurement is free; never a comparison target"
+frozen_outputs: []
