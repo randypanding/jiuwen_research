@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: swarmkernel
+Version: 0.1.0
+Summary: Spec-as-Source Agent Swarm kernel: contracts, hard gates (H1-H8), oracle engines and the information-asymmetry bus.
+Requires-Python: <3.14,>=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic>=2.7
+Requires-Dist: PyYAML>=6.0
+Provides-Extra: test
+Requires-Dist: pytest>=8.0; extra == "test"
+Requires-Dist: hypothesis>=6.100; extra == "test"
+Requires-Dist: jsonschema>=4.0; extra == "test"
