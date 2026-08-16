@@ -10,8 +10,14 @@ from __future__ import annotations
 
 import pytest
 
-from swarmkernel.contracts.instance import DivergenceVerdict
-from swarmkernel.oracle.differ import DifferentialEngine, DifferentialInput, EquivalenceLevel
+from swarmkernel.contracts.instance import DivergenceVerdict, Observation, ProbeResult
+from swarmkernel.contracts.oracle import ObservationChannel
+from swarmkernel.oracle.differ import (
+    DifferentialEngine,
+    DifferentialInput,
+    EquivalenceLevel,
+    select_representative,
+)
 
 from ..conftest import make_report
 
@@ -102,13 +108,27 @@ def test_no_instances_yields_insufficient():
     assert report.verdict is DivergenceVerdict.INSUFFICIENT
 
 
-def test_single_passing_instance_is_closed_not_insufficient():
-    """N=1 is legal (low uncertainty, or R3). It cannot detect silence, but it
-    is not "insufficient evidence" for the question it does answer."""
+def test_single_passing_instance_is_insufficient():
+    """D9 consensus: below min_instances_for_verdict the differential verdict
+    is INSUFFICIENT even when everything passed. "One agreeing sample" has
+    measured nothing about agreement. Single-instance waves avoid this by not
+    producing a differential report at all (H5 records n/a for declared N=1);
+    a 2-instance sample is an audit demand for N>=3, not closure."""
 
     engine = DifferentialEngine([])
     report = engine.run(make_input([make_report("a", breakdown=["x"])]), "DR-8")
-    assert report.verdict is DivergenceVerdict.CLOSED
+    assert report.verdict is DivergenceVerdict.INSUFFICIENT
+
+
+def test_two_passing_instances_are_still_insufficient():
+    """The D9 line: N=3 is the smallest sample that can conclude CLOSED."""
+
+    engine = DifferentialEngine([])
+    reports = [make_report(i, breakdown=["x"]) for i in ("a", "b", "c")]
+    two = engine.run(make_input(reports[:2]), "DR-8b")
+    assert two.verdict is DivergenceVerdict.INSUFFICIENT
+    three = engine.run(make_input(reports), "DR-8c")
+    assert three.verdict is DivergenceVerdict.CLOSED
 
 
 # ------------------------------------------------------------- don't-care
@@ -133,6 +153,136 @@ def test_an_unregistered_difference_stays_a_defect():
     )
     assert len(divs) == 1
     assert divs[0].is_defect
+
+
+# --------------------------------------------------------- float tolerance
+
+
+def float_report(instance_id: str, value: float):
+    base = make_report(instance_id, breakdown=["x"])
+    obs = Observation(
+        channel=ObservationChannel.RETURN, value={"total": value, "breakdown": ["x"]}
+    )
+    probe = ProbeResult(probe_id="PR-TOTAL", entrypoint="cart.total", observations=[obs])
+    return base.model_copy(update={"probe_results": [probe]})
+
+
+def test_representation_noise_is_not_a_divergence_by_default():
+    """D19: 0.1 + 0.2 versus 0.3 is the same number to every physicist and to
+    this engine. Strict equality on floats manufactures false positives."""
+
+    engine = DifferentialEngine([])
+    divs = engine.diff_pair(
+        float_report("a", 0.1 + 0.2),
+        float_report("b", 0.3),
+        EquivalenceLevel.IO,
+    )
+    assert divs == []
+
+
+def test_strict_float_equality_is_an_explicit_opt_in():
+    engine = DifferentialEngine([])
+    divs = engine.diff_pair(
+        float_report("a", 0.1 + 0.2),
+        float_report("b", 0.3),
+        EquivalenceLevel.IO,
+        strict_float_equality=True,
+    )
+    assert len(divs) == 1
+
+
+def test_declared_tolerances_are_honoured():
+    """A looser declared tolerance compares as equal; the default does not."""
+
+    engine = DifferentialEngine([])
+    a, b = float_report("a", 1.0), float_report("b", 1.05)
+    assert engine.diff_pair(a, b, EquivalenceLevel.IO, rel_tol=0.1) == []
+    assert len(engine.diff_pair(a, b, EquivalenceLevel.IO)) == 1
+
+
+def test_run_passes_the_declared_tolerance_through():
+    """Three instances with float noise still conclude CLOSED (D19), because
+    no unresolved divergence survives the default tolerance."""
+
+    engine = DifferentialEngine([])
+    reports = [
+        float_report("a", 0.1 + 0.2),
+        float_report("b", 0.3),
+        float_report("c", 0.1 + 0.2),
+    ]
+    report = engine.run(make_input(reports), "DR-FT")
+    assert report.verdict is DivergenceVerdict.CLOSED
+
+
+def test_a_real_float_difference_is_still_a_defect():
+    engine = DifferentialEngine([])
+    divs = engine.diff_pair(
+        float_report("a", 10.0),
+        float_report("b", 11.0),
+        EquivalenceLevel.IO,
+    )
+    assert len(divs) == 1
+    assert divs[0].is_defect
+
+
+# --------------------------------------------------- representative choice
+
+
+def with_cost(report, tokens, seconds=1.0):
+    return report.model_copy(update={"token_cost": tokens, "wall_time_s": seconds})
+
+
+def test_representative_prefers_the_cheapest_instance():
+    """D27 level 1: cost. Lexicographic-id selection would have picked "a";
+    the multi-criteria rule picks the cheaper "z"."""
+
+    reports = [
+        with_cost(make_report("a", breakdown=["x"]), 10_000),
+        with_cost(make_report("z", breakdown=["x"]), 10),
+    ]
+    assert select_representative(reports) == "z"
+
+
+def test_representative_breaks_cost_ties_on_determinism():
+    """D27 level 2: recomputable determinism (clean-probe share) beats id order."""
+
+    clean = with_cost(make_report("z", breakdown=["x"]), 100)
+    crashed = with_cost(make_report("a", breakdown=["x"]), 100).model_copy(
+        update={
+            "probe_results": [
+                ProbeResult(
+                    probe_id="PR-TOTAL",
+                    entrypoint="cart.total",
+                    observations=[
+                        Observation(channel=ObservationChannel.RETURN, value=None)
+                    ],
+                    crashed=True,
+                )
+            ]
+        }
+    )
+    assert select_representative([crashed, clean]) == "z"
+
+
+def test_representative_falls_back_to_probe_count_then_id():
+    """D27 levels 3-4: code-size proxy, then the deterministic id tiebreak."""
+
+    a = with_cost(make_report("a", breakdown=["x"]), 100)
+    b = with_cost(make_report("b", breakdown=["x"]), 100)
+    assert select_representative([b, a]) == "a"
+
+
+def test_cluster_representative_uses_the_multi_criteria_rule():
+    """Same behaviour (one class), different cost: the cheap instance speaks
+    for the class."""
+
+    reports = [
+        with_cost(make_report("a", breakdown=["x", "y"]), 5_000),
+        with_cost(make_report("b", breakdown=["x", "y"]), 50),
+    ]
+    classes = DifferentialEngine([]).cluster(make_input(reports))
+    assert len(classes) == 1
+    assert classes[0].representative == "b"
 
 
 def test_a_freedom_does_not_forgive_an_unrelated_channel(dont_care_order):

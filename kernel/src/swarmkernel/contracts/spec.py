@@ -275,13 +275,22 @@ class RLevel(str, Enum):
     R1 = "R1"
     """Anchored artefact, internal consumers. Regenerable via spec-delta + H4."""
     R2 = "R2"
-    """Contract artefact, external consumers. Evolve only; breaking needs a version."""
+    """Contract artefact, external consumers. Evolve only; breaking needs a version.
+
+    R2 *may* fan out: parallel regeneration is how drift against external
+    consumers is exposed (D2 consensus). H4 remains the backstop — every
+    fanned-out instance must clear the contract-compatibility gate before
+    admission, so a divergent R2 surface can never slip through.
+    """
     R3 = "R3"
     """Frozen. State-bearing or line-by-line semantics. Forward-append only."""
 
     @property
     def allows_fanout(self) -> bool:
-        return self in (RLevel.R0, RLevel.R1)
+        # R3 is excluded on purpose (PDR-001 §5: frozen artefacts forbid
+        # re-sampling). R2 is included on purpose: its consumers are external,
+        # so only parallel regeneration can surface drift — gated by H4.
+        return self in (RLevel.R0, RLevel.R1, RLevel.R2)
 
     @property
     def allows_discard(self) -> bool:

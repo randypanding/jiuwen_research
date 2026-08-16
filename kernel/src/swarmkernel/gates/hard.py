@@ -39,6 +39,7 @@ class H1Build:
     is paid to look at anything.
     """
 
+    #: Relative cost (D17 fail-fast ordering): 1
     gate_id = GateId.H1_BUILD
     name = "build/type/static"
 
@@ -84,6 +85,7 @@ class H2UnitProperty:
     buys false confidence at full price.
     """
 
+    #: Relative cost (D17 fail-fast ordering): 2
     gate_id = GateId.H2_UNIT_PROPERTY
     name = "unit+property"
 
@@ -152,6 +154,7 @@ class H3Holdout:
     is a request for more samples, and it blocks.
     """
 
+    #: Relative cost (D17 fail-fast ordering): 4
     gate_id = GateId.H3_HOLDOUT
     name = "holdout scenarios"
 
@@ -206,6 +209,7 @@ class H3Holdout:
 class H4ContractSurface:
     """Contract surface + breaking-change detection + version-bump enforcement."""
 
+    #: Relative cost (D17 fail-fast ordering): 1
     gate_id = GateId.H4_SURFACE
     name = "contract surface"
 
@@ -276,6 +280,7 @@ class H4ContractSurface:
 class H5Differential:
     """Cross-instance differential + golden comparison."""
 
+    #: Relative cost (D17 fail-fast ordering): 5
     gate_id = GateId.H5_DIFFERENTIAL
     name = "differential/golden"
 
@@ -297,6 +302,17 @@ class H5Differential:
                 return ok(
                     self.gate_id,
                     "R0: no fan-out, differential not applicable",
+                    verdict="n/a",
+                )
+            if ctx.fanout_n is not None and ctx.fanout_n < 2:
+                # A declared N=1 wave has nothing to compare: with one sample
+                # there is no differential measurement to demand (D9/D18
+                # composition). The decision to run single-instance is recorded
+                # as evidence — like the R0 carve-out above — not as an absence.
+                # Undeclared contexts stay fail-closed (fanout_n=None).
+                return ok(
+                    self.gate_id,
+                    f"N={ctx.fanout_n}: single-instance wave, differential not applicable",
                     verdict="n/a",
                 )
             return missing_evidence(self.gate_id, "differential report")
@@ -363,6 +379,7 @@ class H5Differential:
 class H6Invariant:
     """Spec invariants + runtime guardrails."""
 
+    #: Relative cost (D17 fail-fast ordering): 2
     gate_id = GateId.H6_INVARIANT
     name = "invariants/guardrails"
 
@@ -412,6 +429,7 @@ class H6Invariant:
 class H7Drift:
     """Spec<->code drift, plus the unverifiable-clause census."""
 
+    #: Relative cost (D17 fail-fast ordering): 2
     gate_id = GateId.H7_DRIFT
     name = "spec/code drift"
 
@@ -502,6 +520,7 @@ class H7Drift:
 class H8Budget:
     """Cost, resource and performance budget."""
 
+    #: Relative cost (D17 fail-fast ordering): 1
     gate_id = GateId.H8_BUDGET
     name = "budget"
 

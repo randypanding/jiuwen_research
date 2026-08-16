@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Spec-as-Source Agent Swarm kernel: contracts, hard gates (H1-H8), oracle engines and the information-asymmetry bus."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
+# D21 layering: both dependencies serve the *contracts* layer only
+# (pydantic = construction-time invariants; PyYAML = spec Markdown
+# frontmatter). gates/ and oracle/ import no third-party library.
 dependencies = [
     "pydantic>=2.7",
     "PyYAML>=6.0",

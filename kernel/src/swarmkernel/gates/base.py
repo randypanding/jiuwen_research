@@ -20,12 +20,20 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from ..contracts.base import digest_of
 from ..contracts.gate import Finding, GateId, GateResult, GateStatus
+from ..contracts.governance import MigrationStage
 from ..contracts.oracle import HoldoutOracle, PublicOracle
 from ..contracts.spec import RLevel, SpecDelta, SpecDocument
 from ..oracle.golden import GoldenStore
 from ..oracle.traceability import AnchorResolver, Exemption
 
-__all__ = ["GateContext", "Gate", "GateRegistry", "missing_evidence", "ok", "fail"]
+__all__ = [
+    "GateContext",
+    "Gate",
+    "GateRegistry",
+    "missing_evidence",
+    "ok",
+    "fail",
+]
 
 
 @dataclass
@@ -38,6 +46,10 @@ class GateContext:
     r_level: RLevel = RLevel.R1
     spec: SpecDocument | None = None
     spec_delta: SpecDelta | None = None
+    #: The wave's fan-out plan N for this unit, when declared. None means
+    #: undeclared — H5 then stays fail-closed about missing differential
+    #: evidence (D9/D18 composition).
+    fanout_n: int | None = None
 
     # H1 / H2 / H8: raw tool output, supplied by the harness adapter.
     build: Mapping[str, Any] = field(default_factory=dict)
@@ -91,6 +103,10 @@ class GateContext:
 class Gate(Protocol):
     gate_id: GateId
     name: str
+    #: Relative execution cost, ascending (1 = table lookup / static check,
+    #: 5 = multi-instance differential). Used only to order fail-fast runs;
+    #: defaults to 3 when a gate does not declare one.
+    relative_cost: int
 
     def run(self, ctx: GateContext) -> GateResult: ...
 
@@ -140,6 +156,9 @@ class GateRegistry:
     """Ordered registry. Order matters only for reporting, not for the verdict:
     the admission algebra is a conjunction, so it is order-independent."""
 
+    #: Default cost for gates that do not declare :attr:`Gate.relative_cost`.
+    DEFAULT_COST = 3
+
     def __init__(self, gates: Iterable[Gate] = ()) -> None:
         self._gates: dict[GateId, Gate] = {}
         for g in gates:
@@ -156,5 +175,39 @@ class GateRegistry:
     def ids(self) -> list[GateId]:
         return sorted(self._gates, key=lambda g: g.value)
 
-    def run_all(self, ctx: GateContext) -> list[GateResult]:
-        return [self._gates[gid].run(ctx) for gid in self.ids()]
+    def _cost(self, gate: Gate) -> int:
+        return getattr(gate, "relative_cost", self.DEFAULT_COST)
+
+    def run_all(self, ctx: GateContext, *, fail_fast: bool = False) -> list[GateResult]:
+        """Run the gates and collect their results.
+
+        Default behaviour is *run everything, record everything*: a red build
+        must carry the full measurement so the diagnosis names every defect,
+        not just the first. With ``fail_fast=True`` (D17: M2+ maturity stages),
+        gates run in ascending cost order and the run stops at the first
+        non-admitting result — the un-run gates then surface as missing in the
+        hard report, which the fail-closed algebra already treats as a block.
+        """
+
+        if not fail_fast:
+            return [self._gates[gid].run(ctx) for gid in self.ids()]
+        results: list[GateResult] = []
+        order = sorted(self._gates.values(), key=lambda g: (self._cost(g), g.gate_id.value))
+        for gate in order:
+            result = gate.run(ctx)
+            results.append(result)
+            if not result.status.admits:
+                break
+        return sorted(results, key=lambda r: r.gate.value)
+
+    def run_for_stage(self, ctx: GateContext, stage: MigrationStage) -> list[GateResult]:
+        """D17 consensus policy by migration stage.
+
+        M0/M1 run every gate and record every measurement — the org is still
+        calibrating its instruments, and early fail-fast would starve it of the
+        very data it needs. From M2 on, fail-fast in ascending cost order:
+        pay the cheap gates first, stop at the first blocker.
+        """
+
+        return self.run_all(ctx, fail_fast=stage is not MigrationStage.M0_HARVEST
+                            and stage is not MigrationStage.M1_ANCHOR)

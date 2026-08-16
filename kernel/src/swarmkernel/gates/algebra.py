@@ -75,12 +75,23 @@ def decide(
     results: Sequence[GateResult],
     soft: SoftGateResult | None,
     human_approved: bool = False,
+    soft_required: bool = False,
     decided_by: Role = Role.VERIFIER,
 ) -> AdmissionDecision:
+    """Admission transaction, governance included.
+
+    ``soft_required`` mirrors ``JudgeProtocol.required_for_admission`` (the D6
+    declaration): when the protocol declares the soft gate mandatory and it did
+    not run, the decision blocks with ``ADMIT.SOFT_GATE_MISSING``. When the
+    declaration is absent (default) a missing soft gate neither blocks nor
+    rescues — only the hard report can make something admissible.
+    """
+
     hard = build_hard_report(unit_id, instance_id, results)
     hard_passed = hard.passed
     soft_vetoed = soft is not None and soft.verdict is SoftVerdict.VETO
-    admitted = admit(hard, soft)
+    soft_missing_declared_required = soft_required and soft is None
+    admitted = admit(hard, soft) and not soft_missing_declared_required
 
     reasons: list[Finding] = []
     if not hard_passed:
@@ -111,6 +122,22 @@ def decide(
                 message="soft gate vetoed: " + ("; ".join(citations) or "<uncited>"),
             )
         )
+    if soft_missing_declared_required:
+        reasons.append(
+            Finding(
+                code="ADMIT.SOFT_GATE_MISSING",
+                message=(
+                    "the judge protocol declares the soft gate required for "
+                    "admission, but no soft-gate result was supplied (D6: the "
+                    "declaration decides, not the runtime)"
+                ),
+            )
+        )
+        # Same bookkeeping as the human-approval precondition below: the pure
+        # algebra (H ∧ S) stays intact, the declared requirement is modelled as
+        # a hard failure so the contract's algebra validator still holds.
+        hard_passed = False
+        admitted = False
 
     if admitted and r_level.requires_human_approval and not human_approved:
         # A governance precondition, not a gate failure. It is applied after the

@@ -143,17 +143,27 @@ class SoftGateEngine:
         builder_tier: int,
         builder_identity: str,
         forbid_self_review: bool = True,
+        min_judge_tier: int = 2,
     ) -> tuple[list[JudgeSample], list[str]]:
+        """Filter raw samples. Rejection is *dropping*, never veto-conversion.
+
+        ``min_judge_tier`` is the absolute floor from ``JudgeProtocol``
+        (default 2); the relative rule — judge >= builder, constitution §14 —
+        is enforced here as well as by ``SoftGateResult`` construction.
+        """
+
         kept: list[JudgeSample] = []
         rejected: list[str] = []
+        floor = max(builder_tier, min_judge_tier)
         for s in samples:
             label = f"{s.sample.criterion_id}#{s.sample.presentation_order}"
             if forbid_self_review and s.judge_identity == builder_identity:
                 rejected.append(f"{label}: self-review by {s.judge_identity!r}")
                 continue
-            if s.judge_tier < builder_tier:
+            if s.judge_tier < floor:
                 rejected.append(
-                    f"{label}: judge tier {s.judge_tier} below builder tier {builder_tier}"
+                    f"{label}: judge tier {s.judge_tier} below required floor "
+                    f"{floor} (builder {builder_tier}, protocol minimum {min_judge_tier})"
                 )
                 continue
             kept.append(s.sample)
@@ -168,6 +178,7 @@ class SoftGateEngine:
         judge_tier: int,
         aggregation: str = "any_veto",
         forbid_self_review: bool = True,
+        min_judge_tier: int = 2,
         kappa_threshold: float = 0.6,
         rating_rounds: Sequence[Sequence[str]] = (),
         position_swap_agreement: bool | None = None,
@@ -177,6 +188,7 @@ class SoftGateEngine:
             builder_tier=builder_tier,
             builder_identity=builder_identity,
             forbid_self_review=forbid_self_review,
+            min_judge_tier=min_judge_tier,
         )
 
         rounds = [list(r) for r in rating_rounds]

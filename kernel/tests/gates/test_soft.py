@@ -144,7 +144,33 @@ def test_a_weaker_judge_may_not_overrule_a_stronger_builder():
         builder_identity="builder-7",
     )
     assert kept == []
-    assert "below builder tier" in rejected[0]
+    assert "below required floor" in rejected[0]
+
+
+def test_a_judge_below_the_protocol_floor_is_dropped_even_above_the_builder():
+    """D31: the absolute ``min_model_tier`` floor (JudgeProtocol default 2) is
+    enforced at screening — a tier-1 judge is rejected even when the builder
+    is also tier 1, closing the gap between the documented rule and the code."""
+
+    engine = SoftGateEngine()
+    kept, rejected = engine.screen(
+        [sample(SoftVerdict.NO_VETO, tier=1)],
+        builder_tier=1,
+        builder_identity="builder-7",
+        min_judge_tier=2,
+    )
+    assert kept == []
+    assert "protocol minimum 2" in rejected[0]
+
+
+def test_the_default_aggregation_is_any_veto_everywhere():
+    """D15: engine default and contract default must agree, and must be
+    ``any_veto`` — with k=3, ``majority_veto`` lets one credible cited veto be
+    outvoted, which turns the soft gate into a rubber stamp."""
+
+    from swarmkernel.contracts.oracle import JudgeProtocol
+
+    assert JudgeProtocol().aggregation == "any_veto"
 
 
 def test_the_tier_rule_is_also_enforced_by_the_contract_itself():

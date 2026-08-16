@@ -121,7 +121,9 @@ class DivergenceVerdict(str, Enum):
     INFEASIBLE = "infeasible"
     """All fail even after tier escalation. -> spec/oracle conflict, escalate."""
     INSUFFICIENT = "insufficient"
-    """Fewer than 3 instances and a failure occurred. Sample more before judging."""
+    """Fewer than min_instances_for_verdict instances, pass or fail (D9): the
+    sample is too small for any differential conclusion. Sample more before
+    judging."""
 
 
 class Divergence(Contract):

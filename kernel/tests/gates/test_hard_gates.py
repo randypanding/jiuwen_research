@@ -322,7 +322,32 @@ def test_h5_is_not_applicable_at_r0(ctx):
 
 
 def test_h5_errors_at_r1_without_a_differential_report(ctx):
+    """fanout_n undeclared: the context is silent about the wave plan, so the
+    gate stays fail-closed (D3) and demands the evidence."""
+
     result = H5Differential().run(replace(ctx, differential_report=None))
+    assert result.status is GateStatus.ERROR
+
+
+def test_h5_is_not_applicable_for_a_declared_single_instance_wave(ctx):
+    """D9/D18 composition: a declared N=1 wave has nothing to compare, so H5
+    records "n/a" as evidence — same philosophy as the R0 carve-out. The
+    declaration (fanout_n) is what licenses this, not the runtime's mood."""
+
+    result = H5Differential().run(
+        replace(ctx, differential_report=None, fanout_n=1)
+    )
+    assert result.status is GateStatus.PASS
+    assert result.detail["verdict"] == "n/a"
+
+
+def test_h5_demands_evidence_for_a_declared_multi_instance_wave(ctx):
+    """fanout_n >= 2 declared but no report supplied: a block, because a
+    multi-instance wave owes the differential measurement."""
+
+    result = H5Differential().run(
+        replace(ctx, differential_report=None, fanout_n=3)
+    )
     assert result.status is GateStatus.ERROR
 
 

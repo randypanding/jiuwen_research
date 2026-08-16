@@ -177,8 +177,11 @@ class JudgeProtocol(Contract):
 
     samples: int = Field(default=3, ge=1, description="Independent samples per item.")
     aggregation: str = Field(
-        default="majority_veto",
-        description="majority_veto | unanimous_veto | any_veto",
+        default="any_veto",
+        description="any_veto | majority_veto | unanimous_veto. Default "
+        "``any_veto`` (D15 consensus): a soft gate may only subtract, and with "
+        "k=3 samples ``majority_veto`` lets a single credible veto be outvoted "
+        "— which turns the gate into a rubber stamp.",
     )
     position_swap: bool = Field(
         default=True, description="Counter position/order bias by swapping presentations."
@@ -186,10 +189,19 @@ class JudgeProtocol(Contract):
     allow_abstain: bool = True
     require_citation: bool = True
     forbid_self_review: bool = True
+    required_for_admission: bool = Field(
+        default=False,
+        description="D6 consensus: declare here whether the soft gate must run. "
+        "When true, an absent soft-gate result blocks admission "
+        "(ADMIT.SOFT_GATE_MISSING); when false (default), absence does not "
+        "block — the declaration, not the runtime mood, decides.",
+    )
     min_model_tier: int = Field(
         default=2,
-        description="Judge tier must be >= builder tier (constitution §14). "
-        "Enforced in swarmkernel.gates.algebra.",
+        description="Absolute floor on the judge tier, independent of the "
+        "builder's. Enforced in swarmkernel.gates.soft (SoftGateEngine.screen) "
+        "and — for the judge>=builder half of constitution §14 — by "
+        "SoftGateResult construction itself.",
     )
     calibration_set_id: str | None = None
     min_calibration_agreement: float = Field(default=0.8, ge=0.0, le=1.0)
@@ -238,7 +250,14 @@ class PublicOracle(Contract):
 
 
 class HoldoutOracle(Contract):
-    """The architect-held half. NEVER routed to a generator."""
+    """The architect-held half. NEVER routed to a generator.
+
+    Physical storage (D25 consensus, progressive): single-team phase keeps the
+    holdout in an in-repo directory that the routing policy denies to builders
+    (see bus/policy.py §7.1 — the deny is structural, not a filesystem ACL);
+    once a second team consumes the oracle, move it to a dedicated repository
+    so no single commit can touch both code and measurement.
+    """
 
     ARTIFACT_CLASS = ArtifactClass.ORACLE_HOLDOUT
     CONTRACT_VERSION = "1.0.0"

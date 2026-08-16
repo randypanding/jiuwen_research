@@ -10,12 +10,18 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from enum import Enum
+from typing import ClassVar
 
 from pydantic import Field, model_validator
 
 from .base import ArtifactClass, Contract, Role, utcnow
 from .instance import DivergenceVerdict
 from .spec import RLevel
+
+
+#: Normalised R-level weight for the majority formula (D18): R3 carries the
+#: full weight because frozen artefacts have the least regeneration slack.
+RLEVEL_WEIGHT: dict[str, float] = {"R0": 0.0, "R1": 1 / 3, "R2": 2 / 3, "R3": 1.0}
 
 
 class UncertaintySignal(Contract):
@@ -31,8 +37,33 @@ class UncertaintySignal(Contract):
     r_level: RLevel = RLevel.R0
     prior_verdict: DivergenceVerdict | None = None
 
+    def score_majority(self) -> float:
+        """The majority-plan default (D18 consensus): ``U = 0.4*rework + 0.3*novelty + 0.3*R-level``.
+
+        Every term is recomputable from recorded evidence: rework rate comes
+        from the wave ledger, novelty from the clause count of the delta (or
+        the novel-domain flag, whichever is larger), R-level from the registry.
+        Bounded [0, 1]; deterministic and unit-testable.
+        """
+
+        novelty = max(
+            1.0 if self.novel_domain else 0.0,
+            min(self.new_clause_count / 5.0, 1.0),
+        )
+        s = (
+            0.4 * self.historical_rework_rate
+            + 0.3 * novelty
+            + 0.3 * RLEVEL_WEIGHT[self.r_level.value]
+        )
+        return min(s, 1.0)
+
     def score(self) -> float:
-        """Bounded [0, 1] uncertainty score. Deterministic and unit-testable."""
+        """Signal-decomposition refinement of the uncertainty score (opt-in).
+
+        The fine-grained multi-factor variant (novel-domain flag, clause count,
+        blast radius, prior verdict) is kept as a *refinement input* on top of
+        the majority formula, per the D18 consensus. Bounded [0, 1].
+        """
 
         s = 0.0
         s += 0.25 if self.novel_domain else 0.0
@@ -62,22 +93,39 @@ class FanoutPlan(Contract):
         description="Periodic N>=3 calibration run on an otherwise N=1 unit.",
     )
 
+    #: The closed set of scoring formulas. ``majority`` is the cross-plan
+    #: consensus default (D18); ``signal`` is the fine-grained decomposition,
+    #: kept as an opt-in refinement input.
+    FORMULAS: ClassVar[frozenset[str]] = frozenset({"majority", "signal"})
+
     @classmethod
     def decide(
-        cls, unit_id: str, signal: UncertaintySignal, *, audit_sample: bool = False
+        cls,
+        unit_id: str,
+        signal: UncertaintySignal,
+        *,
+        audit_sample: bool = False,
+        formula: str = "majority",
     ) -> "FanoutPlan":
         """The single, closed decision function for N.
 
         R3 never fans out (§5: frozen artefacts forbid re-sampling). Audit
         samples force N>=3 so that spec entropy is measurable even on units that
         normally run N=1.
+
+        The default ``majority`` formula maps U to N in {1, 3, 6} (D18
+        consensus); ``signal`` maps the fine-grained decomposition score to the
+        wider ladder as a refinement. Thresholds are calibration constants:
+        recompute them from ledger data before changing them.
         """
 
+        if formula not in cls.FORMULAS:
+            raise ValueError(f"unknown fan-out formula {formula!r}")
         if signal.r_level is RLevel.R3:
             return cls(
                 unit_id=unit_id, n=1, reason="R3 frozen: fan-out forbidden", signal=signal
             )
-        score = signal.score()
+        score = signal.score_majority() if formula == "majority" else signal.score()
         if audit_sample:
             n = max(3, math.ceil(1 + 4 * score))
             return cls(
@@ -87,15 +135,28 @@ class FanoutPlan(Contract):
                 signal=signal,
                 audit_sample=True,
             )
-        if score < 0.25:
-            n = 1
-        elif score < 0.55:
-            n = 3
-        elif score < 0.8:
-            n = 5
+        if formula == "majority":
+            if score < 0.25:
+                n = 1
+            elif score < 0.55:
+                n = 3
+            else:
+                n = 6
         else:
-            n = 7
-        return cls(unit_id=unit_id, n=n, reason=f"score={score:.2f}", signal=signal)
+            if score < 0.25:
+                n = 1
+            elif score < 0.55:
+                n = 3
+            elif score < 0.8:
+                n = 5
+            else:
+                n = 7
+        return cls(
+            unit_id=unit_id,
+            n=n,
+            reason=f"formula={formula}, score={score:.2f}",
+            signal=signal,
+        )
 
     @model_validator(mode="after")
     def _r3_never_fans_out(self) -> "FanoutPlan":
@@ -114,11 +175,46 @@ class PipelineKind(str, Enum):
 
 
 class WaveStatus(str, Enum):
+    """The wave lifecycle (D29 consensus): six sequential states plus the
+    terminal rollback state. ``RUNNING`` is deliberately split into
+    BUILDING / MEASURING / ADMITTING because each phase has a different
+    failure policy and a different owner."""
+
     PLANNED = "planned"
     FROZEN = "frozen"
-    RUNNING = "running"
+    BUILDING = "building"
+    MEASURING = "measuring"
+    ADMITTING = "admitting"
     COMMITTED = "committed"
     ROLLED_BACK = "rolled_back"
+
+
+#: Fail-closed transition table: anything not listed here is illegal.
+WAVE_TRANSITIONS: dict[WaveStatus, frozenset[WaveStatus]] = {
+    WaveStatus.PLANNED: frozenset({WaveStatus.FROZEN}),
+    WaveStatus.FROZEN: frozenset({WaveStatus.BUILDING, WaveStatus.ROLLED_BACK}),
+    WaveStatus.BUILDING: frozenset({WaveStatus.MEASURING, WaveStatus.ROLLED_BACK}),
+    WaveStatus.MEASURING: frozenset({WaveStatus.ADMITTING, WaveStatus.ROLLED_BACK}),
+    WaveStatus.ADMITTING: frozenset({WaveStatus.COMMITTED, WaveStatus.ROLLED_BACK}),
+    WaveStatus.COMMITTED: frozenset(),
+    WaveStatus.ROLLED_BACK: frozenset(),
+}
+
+
+def wave_transition(current: WaveStatus, to: WaveStatus) -> WaveStatus:
+    """Legal-transition guard. Raises on any jump not in :data:`WAVE_TRANSITIONS`.
+
+    Skipping a phase (PLANNED -> MEASURING), moving backwards, and leaving a
+    terminal state are all refused: a wave that could skip ADMITTING could
+    commit unmeasured code.
+    """
+
+    if to not in WAVE_TRANSITIONS[current]:
+        raise ValueError(
+            f"illegal wave transition {current.value} -> {to.value}; "
+            f"legal targets: {sorted(t.value for t in WAVE_TRANSITIONS[current]) or ['<terminal>']}"
+        )
+    return to
 
 
 class WaveManifest(Contract):

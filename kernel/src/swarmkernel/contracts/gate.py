@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import ClassVar
 from typing import Any
 
 from pydantic import Field, model_validator
@@ -190,6 +191,28 @@ class HardGateReport(Contract):
         return sorted({g for g in GateId if g.is_hard} - seen, key=lambda g: g.value)
 
 
+class AdmissionOutcome(str, Enum):
+    """Operational three-state outcome (D7 consensus).
+
+    The *algebra* stays two-valued (admits / not-admits) and fail-closed; this
+    enum distinguishes, for operators and CI, *why* something did not admit:
+
+    * ``ADMITTED`` — the algebra passed. Exit code 0.
+    * ``REJECTED`` — a definite failure was observed. Exit code 1.
+    * ``INCONCLUSIVE`` — the instruments could not produce a verdict (sample
+      too small, judge could not decide, evidence never arrived). Retry or
+      escalate, do not fix. Exit code 2.
+    """
+
+    ADMITTED = "admitted"
+    REJECTED = "rejected"
+    INCONCLUSIVE = "inconclusive"
+
+    @property
+    def exit_code(self) -> int:
+        return {self.ADMITTED: 0, self.REJECTED: 1, self.INCONCLUSIVE: 2}[self]
+
+
 class AdmissionDecision(Contract):
     """The atomic admission transaction outcome (PDR-001 §9)."""
 
@@ -201,9 +224,43 @@ class AdmissionDecision(Contract):
     admitted: bool
     hard_passed: bool
     soft_vetoed: bool
+    outcome: AdmissionOutcome | None = Field(
+        default=None,
+        description="Operational three-state outcome. Derived by "
+        "swarmkernel.gates.algebra.decide; cross-checked on construction so a "
+        "forged record cannot mislabel a rejection as inconclusive.",
+    )
     reasons: list[Finding] = Field(default_factory=list)
     decided_at: datetime = Field(default_factory=utcnow)
     decided_by: Role = Role.VERIFIER
+
+    @property
+    def exit_code(self) -> int:
+        """CI contract: 0 admitted, 1 rejected, 2 inconclusive."""
+        return (self.outcome or self._derive_outcome()).exit_code
+
+    #: Finding codes that mean "the instrument could not decide", not "it
+    #: decided against". Kept closed: adding one is a rule change.
+    INCONCLUSIVE_CODES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "H3.INCONCLUSIVE",
+            "H5.INSUFFICIENT",
+            "ADMIT.SOFT_GATE_MISSING",
+        }
+    )
+
+    def _derive_outcome(self) -> AdmissionOutcome:
+        if self.admitted:
+            return AdmissionOutcome.ADMITTED
+        codes = {f.code for f in self.reasons}
+        allowed = self.INCONCLUSIVE_CODES | {
+            c for c in codes if c.endswith(".NO_EVIDENCE")
+        }
+        if codes and codes <= allowed:
+            # Every reason says "could not measure", none says "measured and
+            # it failed": the honest operational answer is inconclusive.
+            return AdmissionOutcome.INCONCLUSIVE
+        return AdmissionOutcome.REJECTED
 
     @model_validator(mode="after")
     def _algebra_holds(self) -> "AdmissionDecision":
@@ -223,4 +280,13 @@ class AdmissionDecision(Contract):
             )
         if not self.admitted and not self.reasons:
             raise ValueError("a rejection must carry at least one reason")
+        derived = self._derive_outcome()
+        if self.outcome is None:
+            # Backfill so persisted records always carry the operational state.
+            self.outcome = derived
+        elif self.outcome != derived:
+            raise ValueError(
+                f"outcome mismatch: reasons imply {derived.value}, "
+                f"record claims {self.outcome.value}"
+            )
         return self

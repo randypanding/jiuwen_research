@@ -10,12 +10,14 @@ Clustering first is what makes this affordable: N instances need
 ``N*(N-1)/2`` over instances, and K is usually 1-3.
 
 The verdict table implements §6 literally, including the ``INSUFFICIENT`` rule
-("fewer than 3 instances and a failure occurred -> sample more before judging").
+(fewer than ``min_instances_for_verdict`` instances -> sample more before
+judging, D9 consensus: undersized samples are unreliable even when all pass).
 """
 
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
@@ -72,7 +74,14 @@ class EquivalenceLevel:
 @dataclass
 class DifferentialInput:
     """Everything the engine needs. Deliberately a plain dataclass: the engine
-    must be callable from a unit test with no bus, no spec repo, no LLM."""
+    must be callable from a unit test with no bus, no spec repo, no LLM.
+
+    Float comparison (D19 consensus) is *declaratively tolerant by default*:
+    numeric channels compare via :func:`math.isclose` with the declared
+    tolerances, because strict equality on floats reports representation noise
+    as behavioural divergence. Strict equality remains available as an explicit
+    opt-in for domains that truly require bit-exactness.
+    """
 
     unit_id: str
     delta_id: str
@@ -83,6 +92,47 @@ class DifferentialInput:
     level: str = EquivalenceLevel.BEHAVIOURAL
     tier_escalated: bool = False
     min_instances_for_verdict: int = 3
+    float_rel_tol: float = 1e-9
+    float_abs_tol: float = 0.0
+    strict_float_equality: bool = False
+
+
+def _numbers(a: object, b: object) -> bool:
+    return (
+        isinstance(a, (int, float))
+        and isinstance(b, (int, float))
+        and not isinstance(a, bool)
+        and not isinstance(b, bool)
+    )
+
+
+def select_representative(reports: Sequence[InstanceReport]) -> str:
+    """Multi-criteria representative selection (D27 consensus).
+
+    Lexicographic over, in order: **cost** (declared token cost, then wall
+    time) -> **determinism** (recomputable from the report: share of probes
+    that completed without crash or timeout) -> **code size proxy** (probe
+    count) -> instance id. Every criterion is recomputable from the persisted
+    report — no subjective scores.
+    """
+
+    def determinism(report: InstanceReport) -> float:
+        probes = report.probe_results
+        if not probes:
+            return 0.0
+        clean = sum(1 for p in probes if not p.crashed and not p.timed_out)
+        return clean / len(probes)
+
+    def key(report: InstanceReport) -> tuple:
+        return (
+            report.token_cost,
+            report.wall_time_s,
+            -determinism(report),
+            len(report.probe_results),
+            report.manifest.instance_id,
+        )
+
+    return min(reports, key=key).manifest.instance_id
 
 
 class DifferentialEngine:
@@ -92,6 +142,40 @@ class DifferentialEngine:
         self.mask = DontCareMask(dont_care)
 
     # ---------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _equal(
+        a: object,
+        b: object,
+        rel_tol: float,
+        abs_tol: float,
+        strict_float_equality: bool,
+    ) -> bool:
+        """Deep equality under the declared float tolerance (D19).
+
+        Observations are structured payloads (dicts, lists) with numbers
+        buried inside, so tolerance applies recursively: containers compare
+        structurally, leaves numerically. ``math.isclose`` never holds for NaN,
+        so NaN leaves always diverge — correct: NaN is a behaviour, not a
+        rounding artefact. The don't-care ``round:N`` normalisers remain the
+        stronger, opt-in instrument.
+        """
+
+        if strict_float_equality:
+            return a == b
+        if _numbers(a, b):
+            return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
+        if isinstance(a, dict) and isinstance(b, dict):
+            return a.keys() == b.keys() and all(
+                DifferentialEngine._equal(a[k], b[k], rel_tol, abs_tol, False)
+                for k in a
+            )
+        if isinstance(a, list) and isinstance(b, list):
+            return len(a) == len(b) and all(
+                DifferentialEngine._equal(x, y, rel_tol, abs_tol, False)
+                for x, y in zip(a, b)
+            )
+        return a == b
 
     def _channels(self, level: str) -> tuple[ObservationChannel, ...]:
         return EquivalenceLevel.CHANNELS[level]
@@ -121,6 +205,7 @@ class DifferentialEngine:
     def cluster(self, data: DifferentialInput) -> list[EquivalenceClass]:
         """Group instances by behavioural fingerprint (LDB-style)."""
 
+        by_id = {r.manifest.instance_id: r for r in data.reports}
         buckets: dict[str, list[str]] = {}
         for report in data.reports:
             fp = self._fingerprint(report, data.level)
@@ -129,15 +214,26 @@ class DifferentialEngine:
             EquivalenceClass(
                 fingerprint=fp,
                 instance_ids=sorted(ids),
-                representative=sorted(ids)[0],
+                representative=select_representative([by_id[i] for i in ids]),
             )
             for fp, ids in sorted(buckets.items())
         ]
 
     def diff_pair(
-        self, left: InstanceReport, right: InstanceReport, level: str
+        self,
+        left: InstanceReport,
+        right: InstanceReport,
+        level: str,
+        *,
+        rel_tol: float = 1e-9,
+        abs_tol: float = 0.0,
+        strict_float_equality: bool = False,
     ) -> list[Divergence]:
-        """Compare two instances probe by probe, channel by channel."""
+        """Compare two instances probe by probe, channel by channel.
+
+        Numeric values compare with the declared tolerance by default (D19);
+        pass ``strict_float_equality=True`` to opt back into exact equality.
+        """
 
         out: list[Divergence] = []
         right_by_probe = {p.probe_id: p for p in right.probe_results}
@@ -153,7 +249,7 @@ class DifferentialEngine:
                 rv = ro.value if ro else None
                 nlv, _ = self.mask.apply(channel.value, lv)
                 nrv, _ = self.mask.apply(channel.value, rv)
-                if nlv == nrv:
+                if self._equal(nlv, nrv, rel_tol, abs_tol, strict_float_equality):
                     continue
                 # Raw values differ *and* survived normalisation. Ask whether any
                 # single registered freedom explains it; if so the divergence is
@@ -205,12 +301,15 @@ class DifferentialEngine:
 
         total = len(data.reports)
         passing = len(data.passing_instance_ids)
-        failing = total - passing
         unresolved = [d for d in divergences if d.is_defect]
 
         if total == 0:
             return DivergenceVerdict.INSUFFICIENT
-        if failing and total < data.min_instances_for_verdict:
+        if total < data.min_instances_for_verdict:
+            # D9 consensus: below the minimum sample size the differential
+            # conclusion is unreliable — including when everything passed.
+            # "Two agreeing samples" is not closure; it is a coincidence rate
+            # you have not measured yet.
             return DivergenceVerdict.INSUFFICIENT
         if passing == total:
             return (
@@ -234,7 +333,16 @@ class DifferentialEngine:
         # fingerprint-identical, so any intra-class pair is provably empty.
         reps = [c.representative for c in classes]
         for a, b in itertools.combinations(sorted(reps), 2):
-            divergences.extend(self.diff_pair(by_id[a], by_id[b], data.level))
+            divergences.extend(
+                self.diff_pair(
+                    by_id[a],
+                    by_id[b],
+                    data.level,
+                    rel_tol=data.float_rel_tol,
+                    abs_tol=data.float_abs_tol,
+                    strict_float_equality=data.strict_float_equality,
+                )
+            )
 
         probes = {p.probe_id for r in data.reports for p in r.probe_results}
         return DifferentialReport(

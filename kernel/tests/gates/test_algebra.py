@@ -290,3 +290,119 @@ def test_decide_is_deterministic_given_the_same_evidence():
     )
     a, b = decide(**kw), decide(**kw)
     assert a.model_dump(exclude={"decided_at"}) == b.model_dump(exclude={"decided_at"})
+
+
+# ------------------------------------------- D6: declared-required soft gate
+
+
+def test_a_declared_required_soft_gate_that_did_not_run_blocks():
+    """D6: the *declaration* decides. When the judge protocol declares the soft
+    gate required for admission, its absence is a block with its own reason —
+    not a silent pass."""
+
+    d = decide(
+        unit_id="U",
+        instance_id="i",
+        r_level=RLevel.R1,
+        results=all_pass(),
+        soft=None,
+        soft_required=True,
+    )
+    assert not d.admitted
+    assert "ADMIT.SOFT_GATE_MISSING" in {f.code for f in d.reasons}
+
+
+def test_an_undeclared_missing_soft_gate_still_admits():
+    """D6 default: no declaration, no block. Only the hard report can make
+    something admissible — absence of the soft gate neither blocks nor rescues."""
+
+    d = decide(
+        unit_id="U",
+        instance_id="i",
+        r_level=RLevel.R1,
+        results=all_pass(),
+        soft=None,
+        soft_required=False,
+    )
+    assert d.admitted
+
+
+def test_a_present_soft_gate_satisfies_the_requirement():
+    """The declared requirement is about absence, not about the verdict: an
+    abstaining judge that ran still counts as having run (D5: abstain is
+    recorded, never silently blocking)."""
+
+    d = decide(
+        unit_id="U",
+        instance_id="i",
+        r_level=RLevel.R1,
+        results=all_pass(),
+        soft=soft(SoftVerdict.ABSTAIN),
+        soft_required=True,
+    )
+    assert d.admitted
+
+
+# ------------------------------------------------------ D7: three outcomes
+
+
+def test_outcomes_and_exit_codes_are_three_valued():
+    """D7: the algebra stays a fail-closed conjunction, but the operational
+    record distinguishes *rejected* (measured failure, fix it) from
+    *inconclusive* (instrument could not decide, retry or escalate)."""
+
+    from swarmkernel.contracts.gate import AdmissionOutcome
+
+    admitted = decide(
+        unit_id="U",
+        instance_id="i",
+        r_level=RLevel.R1,
+        results=all_pass(),
+        soft=soft(SoftVerdict.NO_VETO),
+    )
+    assert admitted.outcome is AdmissionOutcome.ADMITTED
+    assert admitted.exit_code == 0
+
+    rejected = decide(
+        unit_id="U",
+        instance_id="i",
+        r_level=RLevel.R1,
+        results=[
+            result(g, GateStatus.FAIL if g is GateId.H1_BUILD else GateStatus.PASS)
+            for g in HARD
+        ],
+        soft=soft(SoftVerdict.NO_VETO),
+    )
+    assert rejected.outcome is AdmissionOutcome.REJECTED
+    assert rejected.exit_code == 1
+
+    inconclusive = decide(
+        unit_id="U",
+        instance_id="i",
+        r_level=RLevel.R1,
+        results=all_pass(),
+        soft=None,
+        soft_required=True,
+    )
+    assert inconclusive.outcome is AdmissionOutcome.INCONCLUSIVE
+    assert inconclusive.exit_code == 2
+
+
+def test_the_outcome_cannot_be_forged():
+    """A rejection relabelled as inconclusive (to turn a CI failure into a
+    retry) is refused at construction — the reasons give the game away."""
+
+    from pydantic import ValidationError
+
+    from swarmkernel.contracts.gate import AdmissionDecision, AdmissionOutcome
+
+    with pytest.raises(ValidationError, match="outcome mismatch"):
+        AdmissionDecision(
+            unit_id="U",
+            instance_id="i",
+            admitted=False,
+            hard_passed=False,
+            soft_vetoed=False,
+            outcome=AdmissionOutcome.INCONCLUSIVE,
+            reasons=[Finding(code="H1.BUILD_FAILED", message="broken")],
+        )

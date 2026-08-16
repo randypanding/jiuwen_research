@@ -29,7 +29,19 @@ from swarmkernel.contracts.spec import (
     SpecDelta,
     SpecDeltaItem,
 )
-from swarmkernel.contracts.wave import FanoutPlan, PipelineKind, UncertaintySignal, WaveManifest, WaveStatus
+from swarmkernel.contracts.spec_md import (
+    parse_frontmatter,
+    render_spec_markdown,
+    verify_spec_markdown,
+)
+from swarmkernel.contracts.wave import (
+    FanoutPlan,
+    PipelineKind,
+    UncertaintySignal,
+    WaveManifest,
+    WaveStatus,
+    wave_transition,
+)
 
 
 # --------------------------------------------------------------- soft gate
@@ -258,6 +270,127 @@ def test_low_uncertainty_means_single_instance():
     assert plan.n == 1
 
 
+# ---------------------------------------------------- D2: R2 may fan out
+
+
+def test_r2_may_fan_out_but_r3_may_not():
+    """D2 consensus: R2 has external consumers, so parallel regeneration is
+    the only way drift against them becomes visible — H4 stays the backstop.
+    R3 remains frozen (PDR-001 §5)."""
+
+    assert RLevel.R2.allows_fanout is True
+    assert RLevel.R3.allows_fanout is False
+
+
+def test_fanout_plan_allows_r2_above_the_single_sample():
+    signal = UncertaintySignal(
+        novel_domain=True, historical_rework_rate=0.6, r_level=RLevel.R2
+    )
+    plan = FanoutPlan.decide(unit_id="U", signal=signal)
+    assert plan.n > 1  # R2 fans out; H4 gates every fanned-out instance
+
+
+# ------------------------------------------------ D18: majority formula
+
+
+def test_majority_formula_maps_to_the_consensus_ladder():
+    """Default formula U = 0.4*rework + 0.3*novelty + 0.3*R-level, mapped to
+    N in {1, 3, 6} (D18 consensus)."""
+
+    low = UncertaintySignal(
+        historical_rework_rate=0.0, new_clause_count=0, r_level=RLevel.R0
+    )
+    mid = UncertaintySignal(
+        historical_rework_rate=0.5, new_clause_count=0, r_level=RLevel.R1
+    )
+    high = UncertaintySignal(
+        novel_domain=True, historical_rework_rate=1.0, r_level=RLevel.R2
+    )
+    assert 0.0 <= low.score_majority() < 0.25
+    assert 0.25 <= mid.score_majority() < 0.55
+    assert high.score_majority() >= 0.55
+    assert FanoutPlan.decide(unit_id="U", signal=low).n == 1
+    assert FanoutPlan.decide(unit_id="U", signal=mid).n == 3
+    assert FanoutPlan.decide(unit_id="U", signal=high).n == 6
+
+
+def test_signal_formula_is_an_opt_in_refinement():
+    from swarmkernel.contracts.instance import DivergenceVerdict
+
+    signal = UncertaintySignal(
+        novel_domain=True,
+        new_clause_count=99,
+        historical_rework_rate=1.0,
+        blast_radius=1.0,
+        prior_verdict=DivergenceVerdict.SILENCE,
+    )
+    plan = FanoutPlan.decide(unit_id="U", signal=signal, formula="signal")
+    assert signal.score() >= 0.8
+    assert plan.n == 7  # the wider ladder survives as a refinement input
+    assert "formula=signal" in plan.reason
+
+
+def test_unknown_fanout_formula_is_refused():
+    signal = UncertaintySignal(r_level=RLevel.R1)
+    with pytest.raises(ValueError, match="unknown fan-out formula"):
+        FanoutPlan.decide(unit_id="U", signal=signal, formula="vibes")
+
+
+# ------------------------------------------- D29: six-state wave machine
+
+
+def test_wave_status_is_the_six_state_sequence_plus_rollback():
+    assert [s.value for s in WaveStatus] == [
+        "planned",
+        "frozen",
+        "building",
+        "measuring",
+        "admitting",
+        "committed",
+        "rolled_back",
+    ]
+    assert not hasattr(WaveStatus, "RUNNING")
+
+
+def test_the_wave_lifecycle_walks_legally_to_committed():
+    current = WaveStatus.PLANNED
+    for nxt in (
+        WaveStatus.FROZEN,
+        WaveStatus.BUILDING,
+        WaveStatus.MEASURING,
+        WaveStatus.ADMITTING,
+        WaveStatus.COMMITTED,
+    ):
+        current = wave_transition(current, nxt)
+    assert current is WaveStatus.COMMITTED
+
+
+def test_every_non_terminal_state_may_roll_back():
+    for state in (
+        WaveStatus.FROZEN,
+        WaveStatus.BUILDING,
+        WaveStatus.MEASURING,
+        WaveStatus.ADMITTING,
+    ):
+        assert wave_transition(state, WaveStatus.ROLLED_BACK) is WaveStatus.ROLLED_BACK
+
+
+def test_phase_skipping_is_refused():
+    """A wave that could skip ADMITTING could commit unmeasured code."""
+
+    with pytest.raises(ValueError, match="illegal wave transition"):
+        wave_transition(WaveStatus.PLANNED, WaveStatus.MEASURING)
+    with pytest.raises(ValueError, match="illegal wave transition"):
+        wave_transition(WaveStatus.FROZEN, WaveStatus.COMMITTED)
+
+
+def test_terminal_states_are_terminal():
+    with pytest.raises(ValueError, match="illegal wave transition"):
+        wave_transition(WaveStatus.COMMITTED, WaveStatus.PLANNED)
+    with pytest.raises(ValueError, match="illegal wave transition"):
+        wave_transition(WaveStatus.ROLLED_BACK, WaveStatus.PLANNED)
+
+
 def test_calibration_pipeline_can_never_commit():
     with pytest.raises(ValidationError):
         WaveManifest(
@@ -268,6 +401,35 @@ def test_calibration_pipeline_can_never_commit():
             frozen_surface_digest="d",
             status=WaveStatus.COMMITTED,
         )
+
+
+# ------------------------------------------- D22: spec Markdown layer
+
+
+def test_spec_renders_as_markdown_with_frontmatter(spec):
+    text = render_spec_markdown(spec)
+    assert text.startswith("---\n")
+    front = parse_frontmatter(text)
+    assert front["spec_id"] == spec.spec_id
+    assert front["version"] == spec.version
+    assert front["content_digest"].startswith("sha256:")
+    assert "## Don't-care regions" in text or front["dont_care_count"] == 0
+
+
+def test_markdown_rendering_is_deterministic(spec):
+    assert render_spec_markdown(spec) == render_spec_markdown(spec)
+
+
+def test_markdown_verification_pins_the_machine_contract(spec):
+    """Frontmatter carries the machine-layer digest; any model change without
+    a re-render breaks verification (D22 + D23)."""
+
+    text = render_spec_markdown(spec)
+    assert verify_spec_markdown(text, spec) is True
+    tampered = text.replace("# ", "#! ", 1)
+    assert verify_spec_markdown(tampered, spec) is False
+    bumped = spec.model_copy(update={"version": "9.9.9"})
+    assert verify_spec_markdown(text, bumped) is False
 
 
 # ---------------------------------------------------------------- instance
